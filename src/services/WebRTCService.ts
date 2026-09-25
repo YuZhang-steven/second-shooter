@@ -560,24 +560,34 @@ class WebRTCService {
     return this.localStream;
   }
 
-  // Pause local stream (stops video track to release camera hardware)
+  // Pause local stream: releases the camera while keeping the track live so
+  // the peer connection's data channel stays open.
+  //
+  // track.enabled = false stops frames from being captured (vision-camera gets
+  // the hardware back) but leaves the track in readyState 'live', so the
+  // sender on the peer connection still has a real track. track.stop() would
+  // end the track permanently, which react-native-webrtc interprets as the
+  // sender having nothing to send - ICE consent checks then fail and the data
+  // channel drops within seconds.
   pauseLocalStream(): void {
     console.log(`[WebRTC] pauseLocalStream called. localStream exists: ${!!this.localStream}`);
     if (this.localStream) {
       const tracks = this.localStream.getVideoTracks();
-      console.log(`[WebRTC] pauseLocalStream: Stopping ${tracks.length} video tracks`);
+      console.log(`[WebRTC] pauseLocalStream: Disabling ${tracks.length} video tracks`);
       tracks.forEach((track, i) => {
-        console.log(`[WebRTC] pauseLocalStream: Track ${i} before stop: id=${track.id}, readyState=${track.readyState}`);
-        track.stop();
-        console.log(`[WebRTC] pauseLocalStream: Track ${i} after stop: readyState=${track.readyState}`);
+        console.log(`[WebRTC] pauseLocalStream: Track ${i} before: id=${track.id}, readyState=${track.readyState}, enabled=${track.enabled}`);
+        track.enabled = false;
+        console.log(`[WebRTC] pauseLocalStream: Track ${i} after: readyState=${track.readyState}, enabled=${track.enabled}`);
       });
     } else {
       console.log(`[WebRTC] pauseLocalStream: No local stream to pause`);
     }
   }
 
-  // Resume local stream (gets new stream and replaces tracks)
-  // zoom parameter helps select the appropriate physical lens
+  // Resume local stream. If the existing track is just paused
+  // (enabled=false, readyState='live' - the pauseLocalStream path), re-enable
+  // it. Only get a fresh stream and replace the sender's track if the track
+  // is actually gone.
   async resumeLocalStream(facingMode: 'front' | 'back' = 'back', zoom: number = 1): Promise<void> {
     console.log(`[WebRTC] resumeLocalStream called: facingMode=${facingMode}, zoom=${zoom}`);
     if (!this.peerConnection) {
@@ -586,6 +596,13 @@ class WebRTCService {
     }
 
     try {
+      const existingTrack = this.localStream?.getVideoTracks()[0];
+      if (existingTrack && existingTrack.readyState === 'live') {
+        existingTrack.enabled = true;
+        console.log(`[WebRTC] resumeLocalStream: Re-enabled existing track ${existingTrack.id} (readyState=${existingTrack.readyState})`);
+        return;
+      }
+
       // Get a new stream with the appropriate lens
       console.log(`[WebRTC] resumeLocalStream: Getting new local stream...`);
       const newStream = await this.getLocalStream(facingMode, zoom);
