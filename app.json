@@ -16,9 +16,6 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.secondshooter.app",
-      "associatedDomains": [
-        "applinks:apps.binnyva.com"
-      ],
       "infoPlist": {
         "NSCameraUsageDescription": "This app needs camera access to capture photos and videos",
         "NSMicrophoneUsageDescription": "This app needs microphone access to record videos with audio",
