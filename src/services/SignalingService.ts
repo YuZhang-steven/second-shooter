@@ -7,6 +7,7 @@ import {
   addDoc,
   onSnapshot,
   serverTimestamp,
+  deleteField,
   Timestamp,
   Unsubscribe,
   DocumentReference,
@@ -19,7 +20,7 @@ import {
   OFFER_CANDIDATES_SUBCOLLECTION,
   ANSWER_CANDIDATES_SUBCOLLECTION,
 } from '../config/firebase';
-import { generateSessionId } from '../utils/sessionId';
+import { generateSessionId, isValidSessionId } from '../utils/sessionId';
 import { SignalingOffer, SignalingAnswer, IceCandidate } from '../types';
 
 // Signaling documents are still temporary, but an active camera can refresh
@@ -74,22 +75,48 @@ class SignalingService {
   }
 
 
-  // Create a new signaling session
-  async createSession(): Promise<string> {
+  // Create a signaling session. A remembered camera can provide its
+  // previous 6-character Pair ID so controller and camera never have to scan
+  // again. The Firestore document remains temporary; the Pair ID is the durable
+  // identity stored locally on both phones.
+  async createSession(preferredSessionId?: string): Promise<string> {
     await ensureSignedIn();
 
-    // Reset processed flags for new session
+    // Reset processed flags for new/restored session
     this.processedOfferSdp = null;
     this.processedAnswerSdp = null;
 
-    const sessionId = generateSessionId();
-    const sessionRef = doc(db, SESSIONS_COLLECTION, sessionId);
+    const normalizedPreferred = preferredSessionId?.trim().toUpperCase();
+    const sessionId =
+      normalizedPreferred && isValidSessionId(normalizedPreferred)
+        ? normalizedPreferred
+        : generateSessionId();
 
-    await setDoc(sessionRef, {
-      createdAt: serverTimestamp(),
-      expireAt: sessionExpireAt(),
-      status: 'waiting',
-    });
+    const sessionRef = doc(db, SESSIONS_COLLECTION, sessionId);
+    const existing = await getDoc(sessionRef);
+
+    if (existing.exists()) {
+      // A force-quit can leave the old signaling document behind. Preserve its
+      // original createdAt (required by Firestore rules), but remove stale SDP
+      // so a remembered controller never answers an offer from a previous app
+      // process before the fresh offer is published.
+      await setDoc(
+        sessionRef,
+        {
+          expireAt: sessionExpireAt(),
+          status: 'waiting',
+          offer: deleteField(),
+          answer: deleteField(),
+        },
+        { merge: true }
+      );
+    } else {
+      await setDoc(sessionRef, {
+        createdAt: serverTimestamp(),
+        expireAt: sessionExpireAt(),
+        status: 'waiting',
+      });
+    }
 
     this.sessionId = sessionId;
     this.ownsSession = true;
