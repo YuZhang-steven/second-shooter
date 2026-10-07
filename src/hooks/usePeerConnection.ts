@@ -12,6 +12,7 @@ interface UsePeerConnectionOptions {
   onRemoteStream?: (stream: MediaStream) => void;
   onIceCandidate?: (candidate: IceCandidate) => void;
   onDataChannelOpen?: () => void;
+  onDataChannelClose?: () => void;
 }
 
 interface UsePeerConnectionReturn {
@@ -40,6 +41,7 @@ export function usePeerConnection({
   onRemoteStream,
   onIceCandidate,
   onDataChannelOpen,
+  onDataChannelClose,
 }: UsePeerConnectionOptions): UsePeerConnectionReturn {
   const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
@@ -115,6 +117,7 @@ export function usePeerConnection({
       webRTCService.onDataChannelClose(() => {
         console.log('Data channel is no longer ready');
         setIsDataChannelReady(false);
+        onDataChannelClose?.();
       });
 
       // Camera device creates the data channel
@@ -135,7 +138,7 @@ export function usePeerConnection({
       connectionPromiseRef.current = null;
       throw error;
     }
-  }, [role, onCommand, onResponse, onRemoteStream, onIceCandidate, onDataChannelOpen]);
+  }, [role, onCommand, onResponse, onRemoteStream, onIceCandidate, onDataChannelOpen, onDataChannelClose]);
 
   // Create SDP offer (camera device)
   const createOffer = useCallback(async (
