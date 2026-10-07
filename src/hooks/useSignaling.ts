@@ -9,7 +9,7 @@ interface UseSignalingReturn {
   sessionId: string | null;
   isConnected: boolean;
   error: string | null;
-  createSession: () => Promise<string>;
+  createSession: (preferredSessionId?: string) => Promise<string>;
   joinSession: (sessionId: string) => Promise<boolean>;
   sendOffer: (offer: SignalingOffer) => Promise<void>;
   sendAnswer: (answer: SignalingAnswer) => Promise<void>;
@@ -50,10 +50,10 @@ export function useSignaling(role: Role): UseSignalingReturn {
   }, []);
 
   // Create a new session (camera device)
-  const createSession = useCallback(async (): Promise<string> => {
+  const createSession = useCallback(async (preferredSessionId?: string): Promise<string> => {
     try {
       setError(null);
-      const id = await signalingService.createSession();
+      const id = await signalingService.createSession(preferredSessionId);
       sessionIdRef.current = id;
       setSessionId(id);
       return id;
