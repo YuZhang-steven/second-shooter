@@ -498,11 +498,14 @@ export default function CameraScreen() {
   // Force camera remount when screen regains focus (fixes vision-camera not restarting)
   const wasFocusedRef = useRef(isFocused);
   useEffect(() => {
-    if (isFocused && !wasFocusedRef.current) {
+    // Never remount the native camera session while Vision Camera is recording.
+    // Opening Control Center / Settings to change connectivity can move the app
+    // out of focus briefly; remounting here would terminate AVFoundation.
+    if (isFocused && !wasFocusedRef.current && !cameraState.isRecording) {
       setCameraKey(prev => prev + 1);
     }
     wasFocusedRef.current = isFocused;
-  }, [isFocused]);
+  }, [isFocused, cameraState.isRecording]);
 
   // Read by the resume handler, which is memoised and would otherwise close
   // over a stale value.
@@ -723,6 +726,7 @@ export default function CameraScreen() {
     // mid-capture, and skip it when WebRTC holds the lens - vision-camera is
     // deactivated then, so there is no session to restart anyway.
     if (isCapturingRef.current) return;
+    if (cameraState.isRecording) return;
     if (isStreamingRef.current && streamModeRef.current === 'webrtc') return;
 
     // Not while another screen is on top. Every trip out of the app and back -
@@ -735,7 +739,7 @@ export default function CameraScreen() {
 
     setIsCameraInitialized(false);
     setCameraKey(prev => prev + 1);
-  }, [isCapturingRef]));
+  }, [isCapturingRef, cameraState.isRecording]));
 
   // A short screen-off doesn't outlast ICE consent, so the connection can come
   // back reporting 'connected' over a track Android already ended - the remote
@@ -743,6 +747,7 @@ export default function CameraScreen() {
   // because nothing looks wrong. Check the track itself on every resume.
   useEffect(() => {
     if (!isForeground) return;
+    if (cameraState.isRecording) return;
     if (!isStreamingRef.current) return;
     if (streamModeRef.current !== 'webrtc') return;
 
@@ -763,7 +768,7 @@ export default function CameraScreen() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [isForeground, resumeLocalStream]);
+  }, [isForeground, cameraState.isRecording, resumeLocalStream]);
 
   useEffect(() => {
     if (!isStreamingToRemote) return;
