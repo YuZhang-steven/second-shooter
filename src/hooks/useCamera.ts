@@ -123,7 +123,9 @@ export function useCamera(initialState?: Partial<CameraState>) {
 
     try {
       const snapshot = await cameraRef.current.takeSnapshot({
-        quality: 50, // Lower quality for faster streaming
+        // This image is only a temporary remote reference, never the saved
+        // photo. Keep it small so preview traffic cannot dominate controls.
+        quality: 20,
       });
       return snapshot.path;
     } catch {
