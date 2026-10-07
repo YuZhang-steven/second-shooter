@@ -15,6 +15,7 @@ type StreamCallback = (stream: MediaStream) => void;
 type StateCallback = (state: ConnectionState) => void;
 type IceCandidateEmitCallback = (candidate: IceCandidate) => void;
 type DataChannelOpenCallback = () => void;
+type DataChannelCloseCallback = () => void;
 type FrameDataCallback = (frameData: FrameDataMessage) => void;
 
 // Type definitions for react-native-webrtc events
@@ -55,6 +56,7 @@ class WebRTCService {
   private onConnectionStateCallback: StateCallback | null = null;
   private onIceCandidateCallback: IceCandidateEmitCallback | null = null;
   private onDataChannelOpenCallback: DataChannelOpenCallback | null = null;
+  private onDataChannelCloseCallback: DataChannelCloseCallback | null = null;
   private onFrameDataCallback: FrameDataCallback | null = null;
 
   // Create peer connection
@@ -170,6 +172,15 @@ class WebRTCService {
 
     channel.onclose = () => {
       console.log('Data channel closed');
+
+      // Ignore a stale channel closing after a replacement channel has already
+      // been installed. Only the currently active channel owns readiness.
+      if (this.dataChannel === channel) {
+        this.dataChannel = null;
+        if (this.onDataChannelCloseCallback) {
+          this.onDataChannelCloseCallback();
+        }
+      }
     };
 
     channel.onmessage = (event: { data: string }) => {
@@ -421,9 +432,11 @@ class WebRTCService {
     const constraints: any = {
       audio: false,
       video: {
-        width: { ideal: 1920 },
-        height: { ideal: 1080 },
-        frameRate: { ideal: 30 },
+        // Remote preview is only for framing. Keep it deliberately small so
+        // poor Wi-Fi / hotspot connections do not compete with camera control.
+        width: { ideal: 640 },
+        height: { ideal: 360 },
+        frameRate: { ideal: 15 },
         facingMode: facingMode === 'front' ? 'user' : 'environment',
         ...(videoSourceId ? { deviceId: videoSourceId } : {}),
       },
@@ -543,6 +556,11 @@ class WebRTCService {
   // Set callback for data channel open
   onDataChannelOpen(callback: DataChannelOpenCallback): void {
     this.onDataChannelOpenCallback = callback;
+  }
+
+  // Set callback for data channel close
+  onDataChannelClose(callback: DataChannelCloseCallback): void {
+    this.onDataChannelCloseCallback = callback;
   }
 
   // Set callback for frame data messages
@@ -757,6 +775,7 @@ class WebRTCService {
     this.onConnectionStateCallback = null;
     this.onIceCandidateCallback = null;
     this.onDataChannelOpenCallback = null;
+    this.onDataChannelCloseCallback = null;
     this.onFrameDataCallback = null;
 
     // Reset switching state
