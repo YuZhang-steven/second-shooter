@@ -30,4 +30,12 @@ describe('PairingService', () => {
     await expect(pairingService.getCameraPairId()).resolves.toBe('ABC234');
     await expect(pairingService.getRemotePairId()).resolves.toBeNull();
   });
+
+  it('remembers the preferred camera/remote mode', async () => {
+    await pairingService.setPreferredMode('remote');
+    await expect(pairingService.getPreferredMode()).resolves.toBe('remote');
+
+    await pairingService.setPreferredMode('camera');
+    await expect(pairingService.getPreferredMode()).resolves.toBe('camera');
+  });
 });
