@@ -270,6 +270,7 @@ export default function RemoteScreen() {
       }
 
       await pairingService.saveRemotePairId(scannedSessionId);
+      await pairingService.setPreferredMode('remote');
       setRememberedPairId(scannedSessionId);
       setIsRestoringPairing(false);
       if (rememberedRetryTimerRef.current) {
@@ -434,7 +435,8 @@ export default function RemoteScreen() {
   };
 
   // Handle mode toggle - navigate back to camera mode
-  const handleModeToggle = () => {
+  const handleModeToggle = async () => {
+    await pairingService.setPreferredMode('camera');
     clearActiveConnection();
     router.replace('/');
   };
