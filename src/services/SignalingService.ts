@@ -22,9 +22,10 @@ import {
 import { generateSessionId } from '../utils/sessionId';
 import { SignalingOffer, SignalingAnswer, IceCandidate } from '../types';
 
-// Sessions are short-lived pairing artifacts. expireAt drives the Firestore
-// TTL policies that garbage-collect abandoned session and candidate docs;
-// the security rules cap it at 2 hours out.
+// Signaling documents are still temporary, but an active camera can refresh
+// or recreate its session after a long outage. The rules cap each individual
+// expiry at <2 hours, so recovery extends the lease rather than storing a
+// far-future timestamp.
 const SESSION_TTL_MS = 60 * 60 * 1000;
 
 function sessionExpireAt(): Timestamp {
@@ -41,6 +42,37 @@ class SignalingService {
   private unsubscribers: Unsubscribe[] = [];
   private processedOfferSdp: string | null = null;
   private processedAnswerSdp: string | null = null;
+
+  /**
+   * A recording can outlive the signaling document. Firestore TTL may delete
+   * the session while both phones are offline, but the camera keeps the same
+   * 6-character ID in memory. When connectivity returns, recreate that exact
+   * session so the same QR/link can attach a controller again.
+   */
+  private async ensureOwnedSessionDocument(sessionId: string): Promise<void> {
+    if (!this.ownsSession || this.sessionId !== sessionId) {
+      return;
+    }
+
+    await ensureSignedIn();
+
+    const sessionRef = doc(db, SESSIONS_COLLECTION, sessionId);
+    const snapshot = await getDoc(sessionRef);
+
+    if (!snapshot.exists()) {
+      console.log(`[Signaling] Recreating expired session ${sessionId}`);
+      await setDoc(sessionRef, {
+        createdAt: serverTimestamp(),
+        expireAt: sessionExpireAt(),
+        status: 'waiting',
+      });
+
+      // A recreated session must accept fresh descriptions from whichever
+      // controller joins next.
+      this.processedAnswerSdp = null;
+    }
+  }
+
 
   // Create a new signaling session
   async createSession(): Promise<string> {
@@ -86,6 +118,10 @@ class SignalingService {
 
   // Send WebRTC offer
   async sendOffer(sessionId: string, offer: SignalingOffer): Promise<void> {
+    // Recovery is allowed even if Firestore TTL removed the old pairing doc
+    // during a long offline recording.
+    await this.ensureOwnedSessionDocument(sessionId);
+
     const sessionRef = doc(db, SESSIONS_COLLECTION, sessionId);
     await setDoc(
       sessionRef,
@@ -95,6 +131,8 @@ class SignalingService {
           sdp: offer.sdp,
         },
         status: 'offer_sent',
+        // Extend the lease every time the camera advertises/re-advertises.
+        expireAt: sessionExpireAt(),
       },
       { merge: true }
     );
@@ -111,6 +149,7 @@ class SignalingService {
           sdp: answer.sdp,
         },
         status: 'connected',
+        expireAt: sessionExpireAt(),
       },
       { merge: true }
     );
