@@ -224,6 +224,28 @@ describe('WebRTCService', () => {
   });
 
   describe('data channel lifecycle', () => {
+    it('recognizes a channel that is already open when JS handlers attach', async () => {
+      const pc: any = await webRTCService.createPeerConnection();
+      const onOpen = jest.fn();
+      webRTCService.onDataChannelOpen(onOpen);
+
+      const channel: any = {
+        readyState: 'open',
+        onopen: null,
+        onclose: null,
+        onmessage: null,
+        onerror: null,
+        send: jest.fn(),
+        close: jest.fn(),
+      };
+
+      pc.ondatachannel?.({ channel });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(onOpen).toHaveBeenCalledTimes(1);
+      expect(webRTCService.isDataChannelReady()).toBe(true);
+    });
+
     it('notifies listeners when the active data channel closes', async () => {
       const pc: any = await webRTCService.createPeerConnection();
       const onClose = jest.fn();
@@ -239,6 +261,17 @@ describe('WebRTCService', () => {
   });
 
   describe('recovery data channel', () => {
+    it('replaces a stale open command channel before recovery negotiation', async () => {
+      const pc: any = await webRTCService.createPeerConnection();
+      const first: any = webRTCService.createDataChannel();
+      first.readyState = 'open';
+
+      webRTCService.replaceDataChannelForRecovery();
+
+      expect(first.close).toHaveBeenCalledTimes(1);
+      expect(pc.createDataChannel).toHaveBeenCalledTimes(2);
+    });
+
     it('recreates a closed command channel on the existing peer connection', async () => {
       const pc: any = await webRTCService.createPeerConnection();
       const first: any = webRTCService.createDataChannel();
