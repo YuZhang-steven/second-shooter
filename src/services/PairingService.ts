@@ -3,6 +3,9 @@ import { isValidSessionId } from '../utils/sessionId';
 
 const CAMERA_PAIR_KEY = '@secondshooter_camera_pair_id';
 const REMOTE_PAIR_KEY = '@secondshooter_remote_pair_id';
+const PREFERRED_MODE_KEY = '@secondshooter_preferred_mode';
+
+export type PreferredMode = 'camera' | 'remote';
 
 class PairingService {
   private async getValidPairId(key: string): Promise<string | null> {
@@ -54,6 +57,20 @@ class PairingService {
 
   async clearRemotePairId(): Promise<void> {
     await AsyncStorage.removeItem(REMOTE_PAIR_KEY);
+  }
+
+  async getPreferredMode(): Promise<PreferredMode | null> {
+    try {
+      const stored = await AsyncStorage.getItem(PREFERRED_MODE_KEY);
+      return stored === 'camera' || stored === 'remote' ? stored : null;
+    } catch (error) {
+      console.error('[Pairing] Failed to read preferred mode:', error);
+      return null;
+    }
+  }
+
+  async setPreferredMode(mode: PreferredMode): Promise<void> {
+    await AsyncStorage.setItem(PREFERRED_MODE_KEY, mode);
   }
 }
 
