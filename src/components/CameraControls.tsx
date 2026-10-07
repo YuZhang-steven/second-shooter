@@ -223,7 +223,7 @@ export function CameraControls({
           <TouchableOpacity
             style={styles.modeToggleButton}
             onPress={onModeToggle}
-            disabled={disabled || !onModeToggle}
+            disabled={!onModeToggle}
           >
             <View style={styles.toggleSwitch}>
               <View
@@ -266,7 +266,7 @@ export function CameraControls({
           <TouchableOpacity
             style={styles.settingsButton}
             onPress={onSettingsPress}
-            disabled={disabled || !onSettingsPress}
+            disabled={!onSettingsPress}
           >
             <Feather name="settings" size={22} color="#fff" />
           </TouchableOpacity>
@@ -328,7 +328,7 @@ export function CameraControls({
             <TouchableOpacity
               style={[styles.qrButton, isQRLoading && styles.qrButtonLoading]}
               onPress={onQRPress}
-              disabled={disabled || !onQRPress || isQRLoading}
+              disabled={!onQRPress || isQRLoading}
             >
               {currentMode === 'camera' ? (
                 <MaterialCommunityIcons name="qrcode" size={24} color="#fff" />
