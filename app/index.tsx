@@ -71,6 +71,20 @@ export default function CameraScreen() {
   const router = useRouter();
   const isFocused = useIsFocused();
 
+  // On a dedicated controller phone, reopen directly into Remote mode. This is
+  // only a navigation preference; the remembered Pair ID remains independent.
+  const startupRoleCheckedRef = useRef(false);
+  useEffect(() => {
+    if (startupRoleCheckedRef.current) return;
+    startupRoleCheckedRef.current = true;
+
+    pairingService.getPreferredMode().then((mode) => {
+      if (mode === 'remote') {
+        router.replace('/remote');
+      }
+    });
+  }, [router]);
+
   // Permissions
   const { hasPermission: hasCameraPermission, requestPermission: requestCameraPermission } =
     useCameraPermission();
@@ -621,6 +635,7 @@ export default function CameraScreen() {
       // A remembered camera reuses the exact same 6-character Pair ID.
       const activePairId = await createSession(preferredPairId);
       await pairingService.saveCameraPairId(activePairId);
+      await pairingService.setPreferredMode('camera');
 
       await createConnection();
 
@@ -1032,7 +1047,8 @@ export default function CameraScreen() {
   }, [cameraKey]);
 
   // Navigate to remote screen
-  const handleGoToRemote = () => {
+  const handleGoToRemote = async () => {
+    await pairingService.setPreferredMode('remote');
     router.push('/remote');
   };
 
