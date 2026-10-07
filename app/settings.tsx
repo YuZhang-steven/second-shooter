@@ -25,8 +25,6 @@ import {
   TimerDuration,
   AspectRatio,
   GridOverlay,
-  PreviewQuality,
-  PreviewMode,
   FlashMode,
   GalleryApp,
   SYSTEM_DEFAULT_GALLERY,
@@ -51,25 +49,6 @@ const GRID_OPTIONS: { value: GridOverlay; label: string }[] = [
   { value: '3x3', label: '3x3 (Rule of Thirds)' },
   { value: '4x4', label: '4x4' },
 ];
-
-const QUALITY_OPTIONS: { value: PreviewQuality; label: string }[] = [
-  { value: 'low', label: 'Low (480p)' },
-  { value: 'medium', label: 'Medium (720p)' },
-  { value: 'high', label: 'High (1080p)' },
-];
-
-// Named for what they do to the camera rather than for the transport - the
-// user-visible difference is whether the lens gets handed back and forth
-// mid-shoot, not which protocol carries the pixels.
-const PREVIEW_MODE_OPTIONS: { value: PreviewMode; label: string }[] = [
-  { value: 'frames', label: 'Steady (No Lens Switching)' },
-  { value: 'auto', label: 'Auto (Smoother Video)' },
-];
-
-const PREVIEW_MODE_LABELS: Record<PreviewMode, string> = {
-  frames: 'Steady',
-  auto: 'Auto',
-};
 
 const FLASH_OPTIONS: { value: FlashMode; label: string }[] = [
   { value: 'off', label: 'Off' },
@@ -393,24 +372,14 @@ export default function SettingsScreen() {
         {/* Remote Section */}
         <Text style={styles.sectionTitle}>Remote Preview</Text>
         <View style={styles.section}>
-          <SettingRow
-            label="Preview Mode"
-            value={settings.previewMode}
-            displayValue={PREVIEW_MODE_LABELS[settings.previewMode]}
-            options={PREVIEW_MODE_OPTIONS}
-            onSelect={(value) => updateSetting('previewMode', value)}
-          />
-          <SettingRow
-            label="Preview Quality"
-            value={settings.previewQuality}
-            displayValue={
-              settings.previewQuality.charAt(0).toUpperCase() +
-              settings.previewQuality.slice(1)
-            }
-            options={QUALITY_OPTIONS}
-            onSelect={(value) => updateSetting('previewQuality', value)}
-          />
+          <View style={styles.row}>
+            <Text style={styles.rowLabel}>Preview</Text>
+            <Text style={styles.rowValueText}>Low Bandwidth (Automatic)</Text>
+          </View>
         </View>
+        <Text style={styles.sectionFooter}>
+          Preview is kept lightweight so camera controls and capture stay responsive on weaker connections.
+        </Text>
 
         {/* General Section */}
         <Text style={styles.sectionTitle}>General</Text>
