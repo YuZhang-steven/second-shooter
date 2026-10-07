@@ -205,6 +205,11 @@ export default function RemoteScreen() {
     webRTCService.onFrameData(handleFrameData);
   }, [handleFrameData]);
 
+  const handleDataChannelClose = useCallback(() => {
+    console.log('Data channel closed on controller');
+    setIsDataChannelReady(false);
+  }, []);
+
   // WebRTC connection
   const {
     connectionState,
@@ -224,6 +229,7 @@ export default function RemoteScreen() {
       await addSignalingIceCandidate(candidate);
     },
     onDataChannelOpen: handleDataChannelOpen,
+    onDataChannelClose: handleDataChannelClose,
   });
 
   const clearActiveConnection = useCallback(() => {
@@ -465,7 +471,7 @@ export default function RemoteScreen() {
             onSwitchCamera={handleSwitchCamera}
             onZoomChange={handleZoomChange}
             onCaptureModeChange={handleCaptureModeChange}
-            disabled={connectionState !== 'connected'}
+            disabled={connectionState !== 'connected' || !isDataChannelReady}
             lastPhotoUri={lastRemotePhotoUri ?? undefined}
             onOpenGallery={handleOpenPhotoViewer}
             onSettingsPress={handleSettingsPress}
