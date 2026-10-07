@@ -291,6 +291,7 @@ export default function CameraScreen() {
     sendStateUpdate,
     startLocalStream,
     pauseLocalStream,
+    detachLocalVideoTrackForRecording,
     resumeLocalStream,
     close: closeConnection,
   } = usePeerConnection({
@@ -386,12 +387,17 @@ export default function CameraScreen() {
 
     const wasUsingWebRTC = streamModeRef.current === 'webrtc';
     if (wasUsingWebRTC) {
-      pauseLocalStream();
+      // Video is a long-running camera owner. Unlike the short photo handoff,
+      // do not leave a disabled WebRTC getUserMedia track attached: an ICE
+      // restart on reconnect can wake that media path and make AVFoundation
+      // finish the Vision Camera recording. Detach + stop the WebRTC track
+      // completely while keeping its sender/transceiver and DataChannel alive.
+      await detachLocalVideoTrackForRecording();
       setIsWebRTCUsingCamera(false);
       await waitForCameraInit();
     }
     return wasUsingWebRTC;
-  }, [notifyCaptureState, pauseLocalStream, waitForCameraInit]);
+  }, [notifyCaptureState, detachLocalVideoTrackForRecording, waitForCameraInit]);
 
   const releaseCameraForVideo = useCallback(async (wasHeld: boolean): Promise<void> => {
     try {
