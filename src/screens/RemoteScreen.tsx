@@ -193,6 +193,20 @@ export default function RemoteScreen() {
     setIsDataChannelReady(false);
   }, []);
 
+  // iOS can suspend JS while the native WebRTC/SCTP connection remains alive.
+  // If the channel opened while JS was suspended (or React missed that event),
+  // restore readiness from the native service as soon as the app is foreground.
+  useEffect(() => {
+    if (!isForeground) return;
+
+    const nativeReady = webRTCService.isDataChannelReady();
+    if (nativeReady && !isDataChannelReady) {
+      console.log('[REMOTE] Restoring DataChannel readiness from native state');
+      setIsDataChannelReady(true);
+      webRTCService.onFrameData(handleFrameData);
+    }
+  }, [isForeground, isDataChannelReady, handleFrameData]);
+
   // WebRTC connection
   const {
     connectionState,
