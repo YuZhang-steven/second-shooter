@@ -589,15 +589,13 @@ class WebRTCService {
     return this.localStream;
   }
 
-  // Pause local stream: releases the camera while keeping the track live so
-  // the peer connection's data channel stays open.
+  // Pause local stream for short handoffs such as still photos.
   //
-  // track.enabled = false stops frames from being captured (vision-camera gets
-  // the hardware back) but leaves the track in readyState 'live', so the
-  // sender on the peer connection still has a real track. track.stop() would
-  // end the track permanently, which react-native-webrtc interprets as the
-  // sender having nothing to send - ICE consent checks then fail and the data
-  // channel drops within seconds.
+  // track.enabled = false is cheap and lets preview resume immediately. For a
+  // long video recording we deliberately do something stronger in
+  // detachLocalVideoTrackForRecording(): first replaceTrack(null) so the sender
+  // remains negotiated, then stop the old native capture track. That ordering
+  // keeps WebRTC signaling/DataChannel independent from AVFoundation ownership.
   pauseLocalStream(): void {
     console.log(`[WebRTC] pauseLocalStream called. localStream exists: ${!!this.localStream}`);
     if (this.localStream) {
