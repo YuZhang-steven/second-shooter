@@ -215,6 +215,7 @@ class WebRTCService {
       'STOP_RECORDING',
       'SET_ZOOM',
       'SET_FLASH',
+      'SET_CAPTURE_MODE',
       'SWITCH_CAMERA',
       'GET_STATE',
     ].includes(m.type || '');
