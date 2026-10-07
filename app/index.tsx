@@ -855,7 +855,10 @@ export default function CameraScreen() {
     if (!isStreamingToRemote) return;
     if (!hasPaired) return;                 // setup owns the connection until it exists
     if (!isForeground) return;              // no camera to stream, nothing to renegotiate onto
-    if (connectionState === 'connected') return;
+    // Media being green is not enough. A restored controller can have ICE/media
+    // connected while the old SCTP command channel is dead, which would leave
+    // every remote control disabled. Recovery only finishes when both are ready.
+    if (connectionState === 'connected' && isDataChannelReady) return;
 
     let cancelled = false;
     let attempts = 0;
@@ -872,10 +875,15 @@ export default function CameraScreen() {
       attempts += 1;
 
       try {
-        // Long outages can close SCTP completely. Recreate the command channel
-        // before renegotiating so either the old controller or a replacement
-        // controller can regain control.
-        webRTCService.ensureDataChannel();
+        // The first recovery offer deliberately replaces the old command
+        // channel. This matters when the controller app has been suspended or
+        // relaunched: the camera may still see the previous SCTP channel as
+        // "open" even though the returning controller has a new peer process.
+        if (attempts === 1) {
+          webRTCService.replaceDataChannelForRecovery();
+        } else {
+          webRTCService.ensureDataChannel();
+        }
 
         // Never reacquire the camera for preview while Vision Camera is
         // recording. During recording, recovery is control-only: the remote
@@ -915,6 +923,7 @@ export default function CameraScreen() {
     };
   }, [
     connectionState,
+    isDataChannelReady,
     isStreamingToRemote,
     hasPaired,
     isForeground,
