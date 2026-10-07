@@ -30,6 +30,7 @@ interface UsePeerConnectionReturn {
   sendStateUpdate: (state: CameraState, lenses?: LensInfo[], videoNeedsRotation?: boolean, previewZoomLimited?: boolean, streamMode?: StreamMode) => void;
   startLocalStream: () => Promise<MediaStream>;
   pauseLocalStream: () => void;
+  detachLocalVideoTrackForRecording: () => Promise<void>;
   resumeLocalStream: (facingMode?: 'front' | 'back') => Promise<void>;
   close: () => void;
 }
@@ -214,6 +215,15 @@ export function usePeerConnection({
     webRTCService.pauseLocalStream();
   }, []);
 
+  // Fully release WebRTC's native camera track for the duration of a video.
+  // The peer connection/data channel remain alive; only the media source is
+  // detached so network recovery cannot touch AVFoundation while recording.
+  const detachLocalVideoTrackForRecording = useCallback(async (): Promise<void> => {
+    console.log('[usePeerConnection] detachLocalVideoTrackForRecording called');
+    await webRTCService.detachLocalVideoTrackForRecording();
+    setLocalStream(null);
+  }, []);
+
   // Resume local stream (gets new stream after vision-camera is done)
   const resumeLocalStream = useCallback(async (facingMode: 'front' | 'back' = 'back'): Promise<void> => {
     console.log(`[usePeerConnection] resumeLocalStream called: facingMode=${facingMode}`);
@@ -251,6 +261,7 @@ export function usePeerConnection({
     sendStateUpdate,
     startLocalStream,
     pauseLocalStream,
+    detachLocalVideoTrackForRecording,
     resumeLocalStream,
     close,
   };
