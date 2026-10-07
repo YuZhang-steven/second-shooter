@@ -19,7 +19,21 @@ class SettingsService {
     try {
       const stored = await AsyncStorage.getItem(SETTINGS_STORAGE_KEY);
       if (stored) {
-        this.settings = { ...DEFAULT_SETTINGS, ...JSON.parse(stored) };
+        const parsed = JSON.parse(stored) as Partial<AppSettings>;
+        const hadLegacyFramePreview = parsed.previewMode === 'frames';
+
+        // The old Steady mode streamed repeated JPEG snapshots through the
+        // command data channel. Migrate it away so an existing install cannot
+        // re-enable the transport that can close the channel under load.
+        if (hadLegacyFramePreview) {
+          parsed.previewMode = 'auto';
+        }
+
+        this.settings = { ...DEFAULT_SETTINGS, ...parsed };
+
+        if (hadLegacyFramePreview) {
+          await this.saveSettings();
+        }
       }
       this.isLoaded = true;
     } catch (error) {
