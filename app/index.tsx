@@ -36,13 +36,13 @@ import { mediaService, SavedMedia } from '../src/services/MediaService';
 import { webRTCService } from '../src/services/WebRTCService';
 import { Command, CameraState, LensInfo, StreamMode } from '../src/types';
 
-// Reconnection pacing. A brief ICE drop (a network hiccup, a Wi-Fi/cellular
-// handover) recovers on its own, so wait out the grace period before spending a
-// renegotiation on it. The attempt cap stops a phone that was left paired to a
-// camera that never comes back from retrying all day.
+// Reconnection pacing. Recording belongs to the camera phone and may continue
+// for hours while there is no network, so recovery must not have a final retry
+// limit. Retry quickly at first, then settle at a low-frequency cadence to
+// avoid burning battery or hammering Firestore during a long outage.
 const RECONNECT_GRACE_MS = 3000;
 const RECONNECT_RETRY_MS = 5000;
-const RECONNECT_MAX_ATTEMPTS = 12;
+const RECONNECT_MAX_RETRY_MS = 30000;
 
 // Neither vision-camera nor WebRTC releases the camera synchronously, and
 // neither reports when it's done, so every handoff between them waits this out.
@@ -396,6 +396,17 @@ export default function CameraScreen() {
   const releaseCameraForVideo = useCallback(async (wasHeld: boolean): Promise<void> => {
     try {
       if (!wasHeld) return;
+
+      // A recording may be stopped locally while the remote is still offline.
+      // Do not hand the lens back to WebRTC unless there is an actual controller
+      // to receive that preview; keep the camera usable locally instead.
+      if (connectionState !== 'connected' || !isDataChannelReady) {
+        setIsWebRTCUsingCamera(false);
+        setCurrentStreamMode('frame-based');
+        return;
+      }
+
+      setCurrentStreamMode('webrtc');
       setIsWebRTCUsingCamera(true);
       await new Promise(resolve => setTimeout(resolve, CAMERA_HANDOFF_MS));
       await resumeLocalStream(facingRef.current);
@@ -404,7 +415,7 @@ export default function CameraScreen() {
       // sit behind a "camera busy" overlay forever.
       notifyCaptureState(false);
     }
-  }, [notifyCaptureState, resumeLocalStream]);
+  }, [connectionState, isDataChannelReady, notifyCaptureState, resumeLocalStream]);
 
   // Wrap useCamera.startRecording so every shutter path - remote command,
   // volume button, on-screen - goes through the same lock acquisition.
@@ -581,6 +592,17 @@ export default function CameraScreen() {
   // Handle QR code display and session creation
   const handleShowQR = async () => {
     setIsQRLoading(true);
+
+    // Once a camera has paired, keep that session identity alive across network
+    // outages. Showing the QR again must not tear down/recreate WebRTC (and must
+    // never touch the lens while a long recording is in progress). A returning
+    // or replacement controller can scan the same session ID.
+    if (isStreamingToRemote && sessionId) {
+      setShowQR(true);
+      setIsQRLoading(false);
+      return;
+    }
+
     try {
       setIsStreamingToRemote(true);
       setHasPaired(false);
@@ -645,6 +667,13 @@ export default function CameraScreen() {
 
   const handleCloseQR = () => {
     setShowQR(false);
+
+    // After the first successful pairing this QR is also the recovery key.
+    // Hiding it must not destroy the session, especially during a recording.
+    if (hasPaired) {
+      return;
+    }
+
     cleanupSignaling();
     closeConnection();
     setIsStreamingToRemote(false);
@@ -757,9 +786,19 @@ export default function CameraScreen() {
       attempts += 1;
 
       try {
-        // An ended track stays attached to its sender, so ICE could come back
-        // with the remote still looking at nothing. Replace it first.
-        if (streamModeRef.current === 'webrtc' && !webRTCService.hasLiveVideoTrack()) {
+        // Long outages can close SCTP completely. Recreate the command channel
+        // before renegotiating so either the old controller or a replacement
+        // controller can regain control.
+        webRTCService.ensureDataChannel();
+
+        // Never reacquire the camera for preview while Vision Camera is
+        // recording. During recording, recovery is control-only: the remote
+        // gets state + Stop Recording, but no live preview until the clip ends.
+        if (
+          !cameraState.isRecording &&
+          streamModeRef.current === 'webrtc' &&
+          !webRTCService.hasLiveVideoTrack()
+        ) {
           await resumeLocalStream(facingRef.current);
         }
 
@@ -770,8 +809,16 @@ export default function CameraScreen() {
         console.error(`[CAMERA] Reconnect attempt ${attempts} failed:`, error);
       }
 
-      if (cancelled || attempts >= RECONNECT_MAX_ATTEMPTS) return;
-      timer = setTimeout(attempt, RECONNECT_RETRY_MS);
+      if (cancelled) return;
+
+      // Keep trying for as long as the camera app/session is alive. Back off to
+      // 30s so an hours-long outage doesn't turn into constant network traffic.
+      const exponent = Math.min(Math.max(attempts - 1, 0), 3);
+      const retryDelay = Math.min(
+        RECONNECT_RETRY_MS * (2 ** exponent),
+        RECONNECT_MAX_RETRY_MS
+      );
+      timer = setTimeout(attempt, retryDelay);
     };
 
     timer = setTimeout(attempt, RECONNECT_GRACE_MS);
@@ -788,6 +835,7 @@ export default function CameraScreen() {
     createOffer,
     sendOffer,
     resumeLocalStream,
+    cameraState.isRecording,
   ]);
 
   // Keep streaming ref in sync with state (for use in callbacks)
@@ -858,6 +906,11 @@ export default function CameraScreen() {
     // Switching modes mid-outage would only fight the reconnect for the camera.
     if (connectionState !== 'connected') return;
 
+    // A controller that reconnects during an active recording is allowed to
+    // control/stop it, but preview must remain off. Reacquiring the lens here
+    // would compete with Vision Camera and could terminate the recording.
+    if (cameraState.isRecording) return;
+
     const targetMode = determineStreamMode(
       cameraState.facing,
       cameraState.zoom,
@@ -881,6 +934,7 @@ export default function CameraScreen() {
   }, [
     cameraState.facing,
     cameraState.zoom,
+    cameraState.isRecording,
     settings.previewMode,
     isDataChannelReady,
     connectionState,
