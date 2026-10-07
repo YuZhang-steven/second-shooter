@@ -644,7 +644,14 @@ export default function CameraScreen() {
       setCurrentStreamMode(initialStreamMode);
 
       if (initialStreamMode === 'frame-based') {
-        pauseLocalStream();
+        if (armOnly) {
+          // A remembered-but-idle camera should not keep any AVFoundation
+          // getUserMedia source alive just to stay pairable. Keep the sender
+          // negotiated, but detach its track until a controller actually joins.
+          await detachLocalVideoTrackForRecording();
+        } else {
+          pauseLocalStream();
+        }
         setIsWebRTCUsingCamera(false);
       }
 
@@ -682,6 +689,7 @@ export default function CameraScreen() {
     createConnection,
     createOffer,
     createSession,
+    detachLocalVideoTrackForRecording,
     listenForIceCandidate,
     onAnswer,
     pauseLocalStream,
