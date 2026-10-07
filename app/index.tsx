@@ -138,6 +138,14 @@ export default function CameraScreen() {
   // Ref to track current stream mode for use in callbacks (avoids stale closure issues)
   const streamModeRef = useRef<StreamMode>('frame-based');
 
+  // Forward references for the video recording handlers. They're defined later
+  // in the component (they need usePeerConnection's pauseLocalStream/etc), and
+  // handleCommand is defined here. The refs let handleCommand reach the current
+  // implementation without sitting in the deps array, which would trip the
+  // temporal dead zone on first render.
+  const handleStartRecordingRef = useRef<(() => Promise<void>) | null>(null);
+  const handleStopRecordingRef = useRef<(() => Promise<void>) | null>(null);
+
   // Signaling
   const {
     sessionId,
@@ -199,10 +207,14 @@ export default function CameraScreen() {
 
       case 'START_RECORDING':
         try {
-          // Frame capture is automatically paused during recording
-          // (useEffect depends on cameraState.isRecording)
-          await startRecording();
-          sendResponse({ type: 'RECORDING_STARTED' });
+          // handleStartRecording is defined later than handleCommand in this
+          // component, so it can't sit in the deps array (temporal dead zone).
+          // The ref is filled in on every render and the closure here reads
+          // the current implementation when a command actually arrives.
+          if (handleStartRecordingRef.current) {
+            await handleStartRecordingRef.current();
+            sendResponse({ type: 'RECORDING_STARTED' });
+          }
         } catch (error) {
           sendResponse({ type: 'ERROR', message: String(error) });
         }
@@ -210,8 +222,10 @@ export default function CameraScreen() {
 
       case 'STOP_RECORDING':
         try {
-          await stopRecording();
-          sendResponse({ type: 'RECORDING_STOPPED', success: true });
+          if (handleStopRecordingRef.current) {
+            await handleStopRecordingRef.current();
+            sendResponse({ type: 'RECORDING_STOPPED', success: true });
+          }
           // Frame capture is automatically resumed after recording
           // (useEffect depends on cameraState.isRecording)
         } catch (error) {
@@ -241,7 +255,7 @@ export default function CameraScreen() {
         sendStateUpdate(cameraState, availableLenses, false, false, streamModeRef.current);
         break;
     }
-  }, [startRecording, stopRecording, setZoom, updateState, switchCamera, cameraState, availableLenses]);
+  }, [setZoom, updateState, switchCamera, cameraState, availableLenses]);
 
   // WebRTC connection
   const {
@@ -344,6 +358,107 @@ export default function CameraScreen() {
       sendResponse({ type: 'PHOTO_TAKEN', success, error });
     }, [sendResponse]),
   });
+
+  // Videos hold the camera for the whole recording, so they can't ride the
+  // CaptureQueue the way photos do - a video is a long-running session that
+  // has to start and stop on its own clock. The lock itself is the same one
+  // the queue uses: pause WebRTC, mark vision-camera as the user, wait for
+  // it to bind, then on stop mark WebRTC as the user again, wait the
+  // CAMERA_HANDOFF_MS, and resume.
+  //
+  // Without this on iOS the AVFoundation session is already owned by
+  // react-native-webrtc's getUserMedia, so vision-camera's startRecording
+  // throws -11800 ("The operation could not be completed") immediately and
+  // the clip is never written. On Android the same code path works because
+  // the camera framework there is happier about brief overlaps.
+  const recordingHeldCameraRef = useRef(false);
+
+  const acquireCameraForVideo = useCallback(async (): Promise<boolean> => {
+    // The remote's preview is going to be dark for the entire recording, so
+    // tell it up front rather than letting it sit on a frozen frame.
+    notifyCaptureState(true);
+
+    const wasUsingWebRTC = streamModeRef.current === 'webrtc';
+    if (wasUsingWebRTC) {
+      pauseLocalStream();
+      setIsWebRTCUsingCamera(false);
+      await waitForCameraInit();
+    }
+    return wasUsingWebRTC;
+  }, [notifyCaptureState, pauseLocalStream, waitForCameraInit]);
+
+  const releaseCameraForVideo = useCallback(async (wasHeld: boolean): Promise<void> => {
+    try {
+      if (!wasHeld) return;
+      setIsWebRTCUsingCamera(true);
+      await new Promise(resolve => setTimeout(resolve, CAMERA_HANDOFF_MS));
+      await resumeLocalStream(facingRef.current);
+    } finally {
+      // Always clears, same as the photo path - otherwise the remote would
+      // sit behind a "camera busy" overlay forever.
+      notifyCaptureState(false);
+    }
+  }, [notifyCaptureState, resumeLocalStream]);
+
+  // Wrap useCamera.startRecording so every shutter path - remote command,
+  // volume button, on-screen - goes through the same lock acquisition.
+  // The lock stays held for the entire recording and is released by
+  // handleStopRecording or by the onRecordingError callback below.
+  const handleStartRecording = useCallback(async (): Promise<void> => {
+    if (cameraState.isRecording) {
+      console.warn('[CAMERA] startRecording called while already recording');
+      return;
+    }
+
+    const wasHeld = await acquireCameraForVideo();
+    recordingHeldCameraRef.current = wasHeld;
+
+    try {
+      await startRecording(
+        undefined,
+        // vision-camera surfaces recording failures via this callback rather
+        // than by rejecting the startRecording promise. Release the lock
+        // before reporting the error so a future attempt can re-acquire.
+        async (error) => {
+          if (recordingHeldCameraRef.current) {
+            const held = recordingHeldCameraRef.current;
+            recordingHeldCameraRef.current = false;
+            await releaseCameraForVideo(held);
+          }
+          console.error('[CAMERA] Recording error:', error);
+        }
+      );
+    } catch (error) {
+      // startRecording itself rejected - lock was acquired but recording
+      // never began, so release the lock here.
+      if (recordingHeldCameraRef.current) {
+        const held = recordingHeldCameraRef.current;
+        recordingHeldCameraRef.current = false;
+        await releaseCameraForVideo(held);
+      }
+      throw error;
+    }
+  }, [cameraState.isRecording, acquireCameraForVideo, releaseCameraForVideo, startRecording]);
+
+  const handleStopRecording = useCallback(async (): Promise<void> => {
+    try {
+      await stopRecording();
+    } finally {
+      // Always release if we held it, even if stopRecording threw - the
+      // camera needs to go back to WebRTC regardless.
+      if (recordingHeldCameraRef.current) {
+        const held = recordingHeldCameraRef.current;
+        recordingHeldCameraRef.current = false;
+        await releaseCameraForVideo(held);
+      }
+    }
+  }, [stopRecording, releaseCameraForVideo]);
+
+  // Sync the recording handlers into the forward refs so handleCommand
+  // (defined earlier) can dispatch to the current implementation when a
+  // START_RECORDING / STOP_RECORDING command arrives.
+  handleStartRecordingRef.current = handleStartRecording;
+  handleStopRecordingRef.current = handleStopRecording;
 
   // Get camera devices with multi-camera support for optical zoom
   // Request all physical devices to enable lens switching
@@ -904,15 +1019,15 @@ export default function CameraScreen() {
         }
       } else {
         if (cameraState.isRecording) {
-          stopRecording();
+          handleStopRecording();
         } else {
-          startRecording();
+          handleStartRecording();
         }
       }
     } finally {
       volumeShutterBusyRef.current = false;
     }
-  }, [cameraState.captureMode, cameraState.isRecording, settings.timer, actuallyTakePhoto, startRecording, stopRecording]);
+  }, [cameraState.captureMode, cameraState.isRecording, settings.timer, actuallyTakePhoto, handleStartRecording, handleStopRecording]);
 
   useVolumeShutter({ onShutterPress: handleVolumeShutter, enabled: !showQR });
 
@@ -988,8 +1103,8 @@ export default function CameraScreen() {
       <CameraControls
         cameraState={cameraState}
         onTakePhoto={handleTakePhoto}
-        onStartRecording={startRecording}
-        onStopRecording={stopRecording}
+        onStartRecording={handleStartRecording}
+        onStopRecording={handleStopRecording}
         onToggleFlash={toggleFlash}
         onSwitchCamera={switchCamera}
         onZoomChange={setZoom}

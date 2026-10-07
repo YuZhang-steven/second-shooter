@@ -164,6 +164,8 @@ npx expo run:android
 
 This builds the native app with all required modules and installs it on your device.
 
+> **Testing on two iPhones?** See [`docs/IOS_TESTING.md`](docs/IOS_TESTING.md) — it covers prebuild, Apple signing, dev-client install on two devices, the same-WiFi vs different-network paths, and TURN setup.
+
 ### Ongoing Development
 
 ```bash
