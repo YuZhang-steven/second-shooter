@@ -59,6 +59,14 @@ const CAMERA_HANDOFF_MS = 500;
 const CAMERA_RETRY_MS = 700;
 const CAMERA_MAX_RETRIES = 3;
 
+function isPreviewZoomLimited(state: CameraState, mode: StreamMode): boolean {
+  return (
+    mode === 'webrtc' &&
+    state.facing === 'back' &&
+    Math.abs(state.zoom - 1) >= 0.05
+  );
+}
+
 export default function CameraScreen() {
   const router = useRouter();
   const isFocused = useIsFocused();
@@ -113,8 +121,9 @@ export default function CameraScreen() {
   const [lastPhotoUri, setLastPhotoUri] = useState<string | undefined>();
   const [availableLenses, setAvailableLenses] = useState<LensInfo[]>([]);
 
-  // Stream mode tracking (WebRTC for 1x/front, frame-based for other zoom levels)
-  const [currentStreamMode, setCurrentStreamMode] = useState<StreamMode>('frame-based');
+  // Remote preview stays on low-bandwidth WebRTC. Capture zoom can differ from
+  // preview framing; that limitation is reported to the controller separately.
+  const [currentStreamMode, setCurrentStreamMode] = useState<StreamMode>('webrtc');
 
   // Track if WebRTC is actively using the camera (to deactivate vision-camera during WebRTC streaming)
   const [isWebRTCUsingCamera, setIsWebRTCUsingCamera] = useState(false);
@@ -136,7 +145,7 @@ export default function CameraScreen() {
   const facingRef = useRef<'front' | 'back'>('back');
 
   // Ref to track current stream mode for use in callbacks (avoids stale closure issues)
-  const streamModeRef = useRef<StreamMode>('frame-based');
+  const streamModeRef = useRef<StreamMode>('webrtc');
 
   // Forward references for the video recording handlers. They're defined later
   // in the component (they need usePeerConnection's pauseLocalStream/etc), and
@@ -235,8 +244,8 @@ export default function CameraScreen() {
 
       case 'SET_ZOOM':
         setZoom(command.level);
-        // Vision-camera handles zoom directly via its zoom prop
-        // Snapshot captures the zoomed preview and sends it to remote
+        // Capture uses the requested zoom. The low-bandwidth WebRTC preview may
+        // remain at 1x; STATE_UPDATE marks that limitation for the controller.
         break;
 
       case 'SET_FLASH':
@@ -246,13 +255,18 @@ export default function CameraScreen() {
 
       case 'SWITCH_CAMERA':
         switchCamera();
-        // Vision-camera handles the camera switch directly
-        // Snapshot captures the new camera's preview and sends it to remote
+        // Vision-camera applies the new facing direction for capture.
         break;
 
       case 'GET_STATE':
         // Send state with current stream mode (uses ref to avoid stale closure)
-        sendStateUpdate(cameraState, availableLenses, false, false, streamModeRef.current);
+        sendStateUpdate(
+          cameraState,
+          availableLenses,
+          false,
+          isPreviewZoomLimited(cameraState, streamModeRef.current),
+          streamModeRef.current
+        );
         break;
     }
   }, [setZoom, updateState, switchCamera, cameraState, availableLenses]);
@@ -823,7 +837,13 @@ export default function CameraScreen() {
       setIsWebRTCUsingCamera(false);
     }
     setCurrentStreamMode(newMode);
-    sendStateUpdate(cameraState, availableLenses, false, false, newMode);
+    sendStateUpdate(
+      cameraState,
+      availableLenses,
+      false,
+      isPreviewZoomLimited(cameraState, newMode),
+      newMode
+    );
   }, [resumeLocalStream, pauseLocalStream, sendStateUpdate, cameraState, availableLenses, zoomOverride]);
 
   // Debounced stream mode detection based on the preview mode setting, camera
@@ -876,7 +896,13 @@ export default function CameraScreen() {
   // Send state updates when camera state changes and data channel is ready
   useEffect(() => {
     if (isDataChannelReady) {
-      sendStateUpdate(cameraState, availableLenses, false, false, currentStreamMode);
+      sendStateUpdate(
+        cameraState,
+        availableLenses,
+        false,
+        isPreviewZoomLimited(cameraState, currentStreamMode),
+        currentStreamMode
+      );
     }
   }, [cameraState, availableLenses, isDataChannelReady, sendStateUpdate, currentStreamMode]);
 
