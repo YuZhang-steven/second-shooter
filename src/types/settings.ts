@@ -72,13 +72,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   saveFolderName: null,
   galleryApp: SYSTEM_DEFAULT_GALLERY,
   previewQuality: 'medium',
-  // Defaults to 'frames' deliberately. The lens handoff 'auto' depends on is
-  // the source of the camera clicking and of the contention errors the retry
-  // machinery in app/index.tsx exists to absorb, so the quiet path is the one
-  // that ships on by default. 'auto' is kept as an escape hatch while we find
-  // out whether frame-based preview is good enough on its own - if it is, the
-  // webrtc branch and everything propping it up should go.
-  previewMode: 'frames',
+  // Use low-bandwidth WebRTC preview by default. Continuous JPEG frame
+  // streaming is disabled because preview traffic must never endanger camera
+  // commands or capture reliability.
+  previewMode: 'auto',
   keepScreenAwake: true,
   volumeShutter: true,
 };
