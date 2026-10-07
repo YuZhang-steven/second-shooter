@@ -187,6 +187,18 @@ describe('WebRTCService', () => {
     });
   });
 
+  describe('recovery data channel', () => {
+    it('recreates a closed command channel on the existing peer connection', async () => {
+      const pc: any = await webRTCService.createPeerConnection();
+      const first: any = webRTCService.createDataChannel();
+      first.readyState = 'closed';
+
+      webRTCService.ensureDataChannel();
+
+      expect(pc.createDataChannel).toHaveBeenCalledTimes(2);
+    });
+  });
+
   describe('generation', () => {
     it('changes on create so a stale owner can detect it lost the connection', async () => {
       await webRTCService.createPeerConnection();
