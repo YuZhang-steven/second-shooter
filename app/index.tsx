@@ -33,6 +33,7 @@ import { requestMediaLibraryPermission } from '../src/utils/permissions';
 import { detectLenses } from '../src/utils/lensDetection';
 import { determineStreamMode } from '../src/utils/streamMode';
 import { mediaService, SavedMedia } from '../src/services/MediaService';
+import { pairingService } from '../src/services/PairingService';
 import { webRTCService } from '../src/services/WebRTCService';
 import { Command, CameraState, LensInfo, StreamMode } from '../src/types';
 
@@ -598,80 +599,131 @@ export default function CameraScreen() {
     loadLastPhoto();
   }, [settings.saveFolderUri]);
 
-  // Handle QR code display and session creation
-  const handleShowQR = async () => {
-    setIsQRLoading(true);
+  // Build/rebuild the camera side of a remembered pairing. "armOnly" is used
+  // after app launch: negotiate the same Pair ID but immediately pause the
+  // preview track so the local camera stays usable while waiting for the
+  // controller to return.
+  const startRemoteSession = useCallback(async (
+    preferredPairId?: string,
+    options: { showQr?: boolean; armOnly?: boolean } = {}
+  ): Promise<void> => {
+    const showQrForSession = options.showQr ?? false;
+    const armOnly = options.armOnly ?? false;
 
-    // Once a camera has paired, keep that session identity alive across network
-    // outages. Showing the QR again must not tear down/recreate WebRTC (and must
-    // never touch the lens while a long recording is in progress). A returning
-    // or replacement controller can scan the same session ID.
-    if (isStreamingToRemote && sessionId) {
-      setShowQR(true);
-      setIsQRLoading(false);
-      return;
+    if (showQrForSession) {
+      setIsQRLoading(true);
     }
 
     try {
       setIsStreamingToRemote(true);
       setHasPaired(false);
 
-      // Create signaling session and WebRTC connection
-      await createSession();
+      // A remembered camera reuses the exact same 6-character Pair ID.
+      const activePairId = await createSession(preferredPairId);
+      await pairingService.saveCameraPairId(activePairId);
+
       await createConnection();
 
-      // Determine initial stream mode based on current camera state
-      const initialStreamMode = determineStreamMode(
-        cameraState.facing,
-        cameraState.zoom,
-        settings.previewMode
-      );
+      // A restored/background-ready pairing should not take over the lens while
+      // no controller is present. We still briefly create the media track so
+      // the video m-line exists in SDP, then pause it until a controller joins.
+      const initialStreamMode: StreamMode = armOnly
+        ? 'frame-based'
+        : determineStreamMode(
+            cameraState.facing,
+            cameraState.zoom,
+            settings.previewMode
+          );
 
-      // Add video track BEFORE creating offer so it's included in SDP negotiation
       if (initialStreamMode === 'webrtc') {
         setIsWebRTCUsingCamera(true);
         await new Promise(resolve => setTimeout(resolve, CAMERA_HANDOFF_MS));
       }
 
-      // Started even for frame-based, which costs one camera open/close here:
-      // getUserMedia is the only way to get a video track, and the track has to
-      // be in the SDP before the offer for a later switch to webrtc to be a
-      // plain resume rather than a renegotiation. That matters most under
-      // previewMode 'frames', where the track then sits paused all session -
-      // it's what makes flipping the setting back to 'auto' mid-shoot instant.
-      // One handoff per pairing, not per photo.
       await startLocalStream();
       setCurrentStreamMode(initialStreamMode);
 
-      // If starting in frame-based mode, pause the WebRTC stream immediately
       if (initialStreamMode === 'frame-based') {
         pauseLocalStream();
+        setIsWebRTCUsingCamera(false);
       }
 
-      // Create and send offer
       const offer = await createOffer();
       await sendOffer({ type: 'offer', sdp: offer.sdp! });
 
-      // Listen for ICE candidates from remote
       listenForIceCandidate(async (candidate) => {
         await addPeerIceCandidate(candidate);
       });
 
-      // Listen for answer from remote
       onAnswer(async (answer) => {
         await setRemoteDescription({ type: 'answer', sdp: answer.sdp });
         setIsRemoteConnected(true);
         setShowQR(false);
       });
 
-      setShowQR(true);
-      setIsQRLoading(false);
+      setShowQR(showQrForSession);
     } catch (error) {
       console.error('[CAMERA] Connection setup error:', error);
-      Alert.alert('Error', 'Failed to create remote connection');
       setIsStreamingToRemote(false);
-      setIsQRLoading(false);
+      if (showQrForSession) {
+        Alert.alert('Error', 'Failed to create remote connection');
+      } else {
+        console.warn('[CAMERA] Remembered pairing could not be armed yet');
+      }
+    } finally {
+      if (showQrForSession) {
+        setIsQRLoading(false);
+      }
     }
+  }, [
+    addPeerIceCandidate,
+    cameraState.facing,
+    cameraState.zoom,
+    createConnection,
+    createOffer,
+    createSession,
+    listenForIceCandidate,
+    onAnswer,
+    pauseLocalStream,
+    sendOffer,
+    setRemoteDescription,
+    settings.previewMode,
+    startLocalStream,
+  ]);
+
+  // Once this phone has been used as the camera, silently restore that Pair ID
+  // on later launches. QR is no longer part of normal reconnect flow.
+  const autoArmPairingAttemptedRef = useRef(false);
+  useEffect(() => {
+    if (autoArmPairingAttemptedRef.current) return;
+    if (!hasCameraPermission || !hasMicPermission) return;
+
+    autoArmPairingAttemptedRef.current = true;
+    let cancelled = false;
+
+    pairingService.getCameraPairId().then((savedPairId) => {
+      if (cancelled || !savedPairId) return;
+      console.log(`[CAMERA] Restoring remembered Pair ID ${savedPairId}`);
+      startRemoteSession(savedPairId, { armOnly: true }).catch((error) => {
+        console.error('[CAMERA] Failed to restore remembered pairing:', error);
+      });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [hasCameraPermission, hasMicPermission, startRemoteSession]);
+
+  // QR is now only needed for the first pairing, or to show the existing Pair
+  // ID for troubleshooting. A remembered session always reuses the same ID.
+  const handleShowQR = async () => {
+    if (isStreamingToRemote && sessionId) {
+      setShowQR(true);
+      return;
+    }
+
+    const savedPairId = await pairingService.getCameraPairId();
+    await startRemoteSession(savedPairId ?? undefined, { showQr: true });
   };
 
   const handleCloseQR = () => {
