@@ -59,6 +59,11 @@ const CAMERA_HANDOFF_MS = 500;
 const CAMERA_RETRY_MS = 700;
 const CAMERA_MAX_RETRIES = 3;
 
+// Keep optional still-image previews comfortably below conservative WebRTC
+// data-channel message limits. Oversized previews are simply skipped; capture
+// and control must continue regardless.
+const MAX_REMOTE_PREVIEW_BASE64_CHARS = 60_000;
+
 function isPreviewZoomLimited(state: CameraState, mode: StreamMode): boolean {
   return (
     mode === 'webrtc' &&
@@ -361,7 +366,14 @@ export default function CameraScreen() {
         });
         await FileSystem.deleteAsync(fileUri, { idempotent: true });
 
-        console.log(`[CAMERA] Sending photo preview to remote: ${previewBase64.length} bytes`);
+        if (previewBase64.length > MAX_REMOTE_PREVIEW_BASE64_CHARS) {
+          console.warn(
+            `[CAMERA] Skipping oversized photo preview: ${previewBase64.length} base64 chars`
+          );
+          return;
+        }
+
+        console.log(`[CAMERA] Sending photo preview to remote: ${previewBase64.length} base64 chars`);
         sendResponse({ type: 'PHOTO_DATA', data: previewBase64, timestamp });
       } catch (error) {
         console.error('Error sending photo preview to remote:', error);
