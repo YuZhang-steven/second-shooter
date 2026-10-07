@@ -728,6 +728,24 @@ class WebRTCService {
     return this.dataChannel?.readyState === 'open';
   }
 
+  /**
+   * Long outages can permanently close SCTP while the RTCPeerConnection object
+   * is still reusable for an ICE restart. Recreate the command channel before
+   * renegotiating so a returning (or replacement) controller can control an
+   * ongoing local recording.
+   */
+  ensureDataChannel(): void {
+    if (!this.peerConnection) {
+      return;
+    }
+
+    const state = this.dataChannel?.readyState;
+    if (!this.dataChannel || state === 'closed' || state === 'closing') {
+      console.log('[WebRTC] Recreating command data channel for recovery');
+      this.createDataChannel();
+    }
+  }
+
   // Whether there is a connection to renegotiate onto at all. close() can land
   // between a reconnect being scheduled and it firing.
   hasPeerConnection(): boolean {
