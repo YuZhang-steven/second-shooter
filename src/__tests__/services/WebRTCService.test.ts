@@ -156,6 +156,37 @@ describe('WebRTCService', () => {
     });
   });
 
+  describe('low-bandwidth preview', () => {
+    it('requests a small 15fps video stream for remote framing', async () => {
+      await webRTCService.getLocalStream('back');
+
+      expect(mediaDevices.getUserMedia).toHaveBeenLastCalledWith({
+        audio: false,
+        video: expect.objectContaining({
+          width: { ideal: 640 },
+          height: { ideal: 360 },
+          frameRate: { ideal: 15 },
+          facingMode: 'environment',
+        }),
+      });
+    });
+  });
+
+  describe('data channel lifecycle', () => {
+    it('notifies listeners when the active data channel closes', async () => {
+      const pc: any = await webRTCService.createPeerConnection();
+      const onClose = jest.fn();
+      webRTCService.onDataChannelClose(onClose);
+
+      const channel: any = webRTCService.createDataChannel();
+      expect(pc.createDataChannel).toHaveBeenCalled();
+
+      channel.onclose?.();
+
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('generation', () => {
     it('changes on create so a stale owner can detect it lost the connection', async () => {
       await webRTCService.createPeerConnection();
