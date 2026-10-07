@@ -112,6 +112,11 @@ export function usePeerConnection({
         onDataChannelOpen?.();
       });
 
+      webRTCService.onDataChannelClose(() => {
+        console.log('Data channel is no longer ready');
+        setIsDataChannelReady(false);
+      });
+
       // Camera device creates the data channel
       if (role === 'camera') {
         webRTCService.createDataChannel();
