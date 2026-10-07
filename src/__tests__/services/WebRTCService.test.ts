@@ -156,6 +156,57 @@ describe('WebRTCService', () => {
     });
   });
 
+  describe('recording camera handoff', () => {
+    it('detaches the WebRTC camera track without removing its sender, then restores a fresh track', async () => {
+      const pc: any = await webRTCService.createPeerConnection();
+
+      const originalTrack = {
+        kind: 'video',
+        id: 'preview-original',
+        readyState: 'live',
+        enabled: true,
+        stop: jest.fn(),
+      };
+      const originalStream: any = {
+        getTracks: () => [originalTrack],
+        getVideoTracks: () => [originalTrack],
+      };
+
+      (mediaDevices.getUserMedia as jest.Mock).mockResolvedValueOnce(originalStream);
+
+      const stream = await webRTCService.getLocalStream('back');
+      webRTCService.addLocalStream(stream);
+
+      const sender = pc.getSenders()[0];
+      expect(sender.track).toBe(originalTrack);
+
+      await webRTCService.detachLocalVideoTrackForRecording();
+
+      expect(sender.replaceTrack).toHaveBeenCalledWith(null);
+      expect(sender.track).toBeNull();
+      expect(originalTrack.stop).toHaveBeenCalledTimes(1);
+      expect(webRTCService.getLocalStreamRef()).toBeNull();
+
+      const restoredTrack = {
+        kind: 'video',
+        id: 'preview-restored',
+        readyState: 'live',
+        enabled: true,
+        stop: jest.fn(),
+      };
+      const restoredStream: any = {
+        getTracks: () => [restoredTrack],
+        getVideoTracks: () => [restoredTrack],
+      };
+      (mediaDevices.getUserMedia as jest.Mock).mockResolvedValueOnce(restoredStream);
+
+      await webRTCService.resumeLocalStream('back');
+
+      expect(sender.replaceTrack).toHaveBeenLastCalledWith(restoredTrack);
+      expect(sender.track).toBe(restoredTrack);
+    });
+  });
+
   describe('low-bandwidth preview', () => {
     it('requests a small 15fps video stream for remote framing', async () => {
       await webRTCService.getLocalStream('back');
