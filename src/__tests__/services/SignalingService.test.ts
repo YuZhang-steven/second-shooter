@@ -5,6 +5,7 @@ import { generateSessionId } from '../../utils/sessionId';
 // Mock the sessionId generator
 jest.mock('../../utils/sessionId', () => ({
   generateSessionId: jest.fn(() => 'ABC123'),
+  isValidSessionId: jest.fn((value: string) => /^[A-HJ-NP-Z2-9]{6}$/.test(value)),
 }));
 
 // Get mock functions
@@ -24,8 +25,8 @@ describe('SignalingService', () => {
 
     // Reset default mock implementations
     mockGetDoc.mockResolvedValue({
-      exists: () => true,
-      data: () => ({}),
+      exists: () => false,
+      data: () => null,
     });
     mockSetDoc.mockResolvedValue(undefined);
     mockAddDoc.mockResolvedValue({ id: 'mock-doc-id' });
@@ -55,6 +56,27 @@ describe('SignalingService', () => {
       await signalingService.createSession();
 
       expect(signalingService.getSessionId()).toBe('ABC123');
+    });
+
+    it('should restore a remembered Pair ID without generating a new one', async () => {
+      mockGetDoc.mockResolvedValueOnce({
+        exists: () => true,
+        data: () => ({ status: 'connected' }),
+      });
+
+      const sessionId = await signalingService.createSession('XYZ789');
+
+      expect(sessionId).toBe('XYZ789');
+      expect(generateSessionId).not.toHaveBeenCalled();
+      expect(mockSetDoc).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          status: 'waiting',
+          offer: expect.anything(),
+          answer: expect.anything(),
+        }),
+        { merge: true }
+      );
     });
   });
 
