@@ -15,6 +15,7 @@ import { useSignaling } from '../hooks/useSignaling';
 import { usePeerConnection } from '../hooks/usePeerConnection';
 import { useSettings } from '../hooks/useSettings';
 import { useVolumeShutter } from '../hooks/useVolumeShutter';
+import { useAppState } from '../hooks/useAppState';
 import { webRTCService } from '../services/WebRTCService';
 import { pairingService } from '../services/PairingService';
 import {
@@ -48,6 +49,7 @@ export default function RemoteScreen() {
 
   // Settings
   const { settings } = useSettings();
+  const isForeground = useAppState();
 
   // Keep screen awake based on setting
   useEffect(() => {
@@ -469,12 +471,13 @@ export default function RemoteScreen() {
   // WebRTC mode comes back rendering an RTCView for a track the camera has
   // since abandoned - a black screen that never resolves.
   useEffect(() => {
+    if (!isForeground) return;
     if (!isDataChannelReady || showScanner) return;
     if (connectionState !== 'connected') return;
 
-    console.log('Connected with data channel ready, requesting camera state');
+    console.log('Connected/foreground with data channel ready, requesting camera state');
     sendCommand({ type: 'GET_STATE' });
-  }, [isDataChannelReady, showScanner, connectionState, sendCommand]);
+  }, [isForeground, isDataChannelReady, showScanner, connectionState, sendCommand]);
 
   // The camera device normally pairs capturing:true with a later false. Clear
   // a stale busy state if the capture/recording path is interrupted.
