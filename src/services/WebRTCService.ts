@@ -38,6 +38,12 @@ class WebRTCService {
   private localStream: MediaStream | null = null;
   private remoteStream: MediaStream | null = null;
 
+  // Keep the original video sender even when its camera track is temporarily
+  // detached for a long-running Vision Camera recording. The transceiver/media
+  // section stays in the peer connection, but WebRTC no longer owns an
+  // AVFoundation capture track until recording explicitly stops.
+  private videoSender: any = null;
+
   // ICE candidates that arrived before there was a remote description to
   // attach them to. See addIceCandidate for why this is the normal case.
   private pendingIceCandidates: IceCandidate[] = [];
@@ -70,6 +76,7 @@ class WebRTCService {
       this.peerConnection = null;
     }
     this.pendingIceCandidates = [];
+    this.videoSender = null;
     this.generation++;
 
     const rtcConfig = await getRtcConfig();
@@ -471,7 +478,10 @@ class WebRTCService {
     console.log(`[WebRTC] addLocalStream: Adding ${videoTracks.length} video tracks to peer connection`);
     videoTracks.forEach((track, i) => {
       console.log(`[WebRTC] addLocalStream: Track ${i}: id=${track.id}, readyState=${track.readyState}`);
-      this.peerConnection!.addTrack(track, stream);
+      const sender = this.peerConnection!.addTrack(track, stream);
+      if (track.kind === 'video') {
+        this.videoSender = sender;
+      }
     });
     console.log(`[WebRTC] addLocalStream: Complete. Senders count: ${this.peerConnection.getSenders().length}`);
   }
@@ -603,6 +613,47 @@ class WebRTCService {
     }
   }
 
+  /**
+   * Fully detach WebRTC's camera capture for a long-running local video.
+   *
+   * Disabling a track is enough for short photo handoffs, but on iOS the
+   * disabled getUserMedia track still belongs to WebRTC/AVFoundation. An ICE
+   * restart can renegotiate that media section and disturb Vision Camera,
+   * causing its recording to finish as soon as connectivity returns.
+   *
+   * replaceTrack(null) keeps the negotiated video sender/transceiver in place
+   * while removing the native capture source. We then stop the old track so
+   * Vision Camera exclusively owns the camera until explicit Stop Recording.
+   */
+  async detachLocalVideoTrackForRecording(): Promise<void> {
+    console.log(`[WebRTC] detachLocalVideoTrackForRecording called. localStream exists: ${!!this.localStream}`);
+
+    const tracks = this.localStream?.getVideoTracks() ?? [];
+    const sender =
+      this.videoSender ??
+      this.peerConnection?.getSenders().find((candidate: any) => candidate.track?.kind === 'video') ??
+      null;
+
+    if (sender) {
+      this.videoSender = sender;
+      try {
+        console.log('[WebRTC] Detaching video sender track for recording');
+        await sender.replaceTrack(null);
+      } catch (error) {
+        // Stopping the capture track below is still essential even if this
+        // native implementation rejects replaceTrack(null).
+        console.error('[WebRTC] Failed to detach video sender track:', error);
+      }
+    }
+
+    tracks.forEach((track, i) => {
+      console.log(`[WebRTC] Stopping recording handoff track ${i}: id=${track.id}, readyState=${track.readyState}`);
+      track.stop();
+    });
+
+    this.localStream = null;
+  }
+
   // Resume local stream. If the existing track is just paused
   // (enabled=false, readyState='live' - the pauseLocalStream path), re-enable
   // it. Only get a fresh stream and replace the sender's track if the track
@@ -626,17 +677,26 @@ class WebRTCService {
       console.log(`[WebRTC] resumeLocalStream: Getting new local stream...`);
       const newStream = await this.getLocalStream(facingMode, zoom);
 
-      // Replace the video track in the peer connection
+      // Replace the video track in the peer connection. During video recording
+      // videoSender.track is intentionally null, so remember the sender rather
+      // than trying to rediscover it by sender.track.kind.
       const senders = this.peerConnection.getSenders();
       const videoTrack = newStream.getVideoTracks()[0];
       console.log(`[WebRTC] resumeLocalStream: Got ${senders.length} senders, new videoTrack: ${videoTrack?.id}, readyState: ${videoTrack?.readyState}`);
 
-      for (const sender of senders) {
-        if (sender.track?.kind === 'video' && videoTrack) {
-          console.log(`[WebRTC] resumeLocalStream: Replacing track on sender. Old: ${sender.track?.id}, New: ${videoTrack.id}`);
-          await sender.replaceTrack(videoTrack);
-          console.log(`[WebRTC] resumeLocalStream: Track replaced successfully`);
-        }
+      const sender =
+        this.videoSender ??
+        senders.find((candidate: any) => candidate.track?.kind === 'video') ??
+        null;
+
+      if (sender && videoTrack) {
+        this.videoSender = sender;
+        console.log(`[WebRTC] resumeLocalStream: Restoring video track on existing sender. New: ${videoTrack.id}`);
+        await sender.replaceTrack(videoTrack);
+        console.log('[WebRTC] resumeLocalStream: Track replaced successfully');
+      } else if (videoTrack) {
+        console.log('[WebRTC] resumeLocalStream: No existing video sender; adding track');
+        this.videoSender = this.peerConnection.addTrack(videoTrack, newStream);
       }
     } catch (error) {
       console.error('[WebRTC] resumeLocalStream error:', error);
@@ -788,6 +848,7 @@ class WebRTCService {
     }
 
     this.remoteStream = null;
+    this.videoSender = null;
     this.onCommandCallback = null;
     this.onResponseCallback = null;
     this.onRemoteStreamCallback = null;
