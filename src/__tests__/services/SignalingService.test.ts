@@ -123,6 +123,41 @@ describe('SignalingService', () => {
     });
   });
 
+  describe('long-outage recovery', () => {
+    it('recreates an expired owned session with the same ID before publishing a new offer', async () => {
+      await signalingService.createSession();
+      mockSetDoc.mockClear();
+
+      mockGetDoc.mockResolvedValueOnce({
+        exists: () => false,
+        data: () => null,
+      });
+
+      await signalingService.sendOffer('ABC123', {
+        type: 'offer',
+        sdp: 'recovery-offer',
+      });
+
+      expect(mockSetDoc).toHaveBeenNthCalledWith(
+        1,
+        expect.anything(),
+        expect.objectContaining({
+          status: 'waiting',
+        })
+      );
+      expect(mockSetDoc).toHaveBeenNthCalledWith(
+        2,
+        expect.anything(),
+        expect.objectContaining({
+          offer: { type: 'offer', sdp: 'recovery-offer' },
+          status: 'offer_sent',
+          expireAt: expect.anything(),
+        }),
+        { merge: true }
+      );
+    });
+  });
+
   describe('sendAnswer', () => {
     it('should send answer to session document', async () => {
       const answer = { type: 'answer' as const, sdp: 'mock-answer-sdp' };
