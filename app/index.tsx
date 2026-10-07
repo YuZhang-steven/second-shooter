@@ -16,7 +16,6 @@ import {
   useCameraPermission,
   useMicrophonePermission,
 } from 'react-native-vision-camera';
-import * as FileSystem from 'expo-file-system/legacy';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { CameraControls } from '../src/components/CameraControls';
 import { QRCodeDisplay } from '../src/components/QRCodeDisplay';
@@ -59,11 +58,6 @@ const CAMERA_HANDOFF_MS = 500;
 const CAMERA_RETRY_MS = 700;
 const CAMERA_MAX_RETRIES = 3;
 
-// Keep optional still-image previews comfortably below conservative WebRTC
-// data-channel message limits. Oversized previews are simply skipped; capture
-// and control must continue regardless.
-const MAX_REMOTE_PREVIEW_BASE64_CHARS = 60_000;
-
 function isPreviewZoomLimited(state: CameraState, mode: StreamMode): boolean {
   return (
     mode === 'webrtc' &&
@@ -91,7 +85,6 @@ export default function CameraScreen() {
     switchCamera,
     setCaptureMode,
     takePhoto,
-    takeSnapshot,
     startRecording,
     stopRecording,
     updateState,
@@ -211,9 +204,12 @@ export default function CameraScreen() {
   const handleCommand = useCallback(async (command: Command) => {
     switch (command.type) {
       case 'TAKE_PHOTO':
-        // Queued, not awaited: a rapid burst from the remote lines up behind
-        // the shot in flight instead of fighting it for the camera. The
-        // controller sends PHOTO_TAKEN and PHOTO_DATA for each one.
+        // Never let a stale controller mode ask AVFoundation for a still while
+        // the same Vision Camera session is recording video.
+        if (cameraState.isRecording) {
+          sendResponse({ type: 'ERROR', message: 'Cannot take a photo while recording' });
+          break;
+        }
         requestCapture({ notifyRemote: true }).catch((error) => {
           console.error('Remote capture failed:', error);
         });
@@ -221,10 +217,13 @@ export default function CameraScreen() {
 
       case 'START_RECORDING':
         try {
+          // Keep the authoritative camera state in video mode even if an older
+          // controller missed SET_CAPTURE_MODE. This also makes STATE_UPDATE
+          // preserve the controller's Video UI while recording.
+          setCaptureMode('video');
+
           // handleStartRecording is defined later than handleCommand in this
           // component, so it can't sit in the deps array (temporal dead zone).
-          // The ref is filled in on every render and the closure here reads
-          // the current implementation when a command actually arrives.
           if (handleStartRecordingRef.current) {
             await handleStartRecordingRef.current();
             sendResponse({ type: 'RECORDING_STARTED' });
@@ -258,6 +257,10 @@ export default function CameraScreen() {
         // Note: STATE_UPDATE is sent automatically via useEffect when cameraState changes
         break;
 
+      case 'SET_CAPTURE_MODE':
+        setCaptureMode(command.mode);
+        break;
+
       case 'SWITCH_CAMERA':
         switchCamera();
         // Vision-camera applies the new facing direction for capture.
@@ -274,7 +277,7 @@ export default function CameraScreen() {
         );
         break;
     }
-  }, [setZoom, updateState, switchCamera, cameraState, availableLenses]);
+  }, [setZoom, updateState, setCaptureMode, switchCamera, cameraState, availableLenses]);
 
   // WebRTC connection
   const {
@@ -315,7 +318,6 @@ export default function CameraScreen() {
   // this one queue, so two captures can never overlap on the same camera.
   const { requestCapture, isCapturingRef } = useCaptureController({
     takePhoto,
-    takeSnapshot,
 
     // WebRTC and vision-camera can't hold the camera at the same time.
     acquireCamera: useCallback(async () => {
@@ -357,28 +359,6 @@ export default function CameraScreen() {
         setLastPhotoUri(saved.uri);
       }
     }, []),
-
-    onPreviewReady: useCallback(async (path: string, timestamp: number) => {
-      try {
-        const fileUri = path.startsWith('file://') ? path : `file://${path}`;
-        const previewBase64 = await FileSystem.readAsStringAsync(fileUri, {
-          encoding: FileSystem.EncodingType.Base64,
-        });
-        await FileSystem.deleteAsync(fileUri, { idempotent: true });
-
-        if (previewBase64.length > MAX_REMOTE_PREVIEW_BASE64_CHARS) {
-          console.warn(
-            `[CAMERA] Skipping oversized photo preview: ${previewBase64.length} base64 chars`
-          );
-          return;
-        }
-
-        console.log(`[CAMERA] Sending photo preview to remote: ${previewBase64.length} base64 chars`);
-        sendResponse({ type: 'PHOTO_DATA', data: previewBase64, timestamp });
-      } catch (error) {
-        console.error('Error sending photo preview to remote:', error);
-      }
-    }, [sendResponse]),
 
     onRemoteCaptureComplete: useCallback((success: boolean, error?: string) => {
       sendResponse({ type: 'PHOTO_TAKEN', success, error });
@@ -923,72 +903,6 @@ export default function CameraScreen() {
     setIsCameraInitialized(false);
   }, [cameraKey]);
 
-  // Frame capture using vision-camera snapshot - sends frames to remote device
-  // Only used when in frame-based mode (not WebRTC)
-  const frameIdRef = useRef(0);
-  useEffect(() => {
-    if (!isDataChannelReady) return;
-    if (currentStreamMode === 'webrtc') return;
-    if (!isCameraInitialized) return;
-    if (zoomOverride !== null) return;
-    if (cameraState.isRecording) return;
-
-    // Capture and send frames at ~8 FPS (need time for file I/O)
-    let isCapturing = false; // Prevent overlapping captures
-    let startupComplete = false;
-
-    // Delay actual capture start to let camera fully stabilize and switch lenses
-    // 1000ms gives time for telephoto lens selection when zoom > 1
-    const captureStartTimer = setTimeout(() => {
-      startupComplete = true;
-    }, 1000);
-
-    const captureInterval = setInterval(async () => {
-      if (!startupComplete) return;
-      if (isCapturing) return;
-      // Skipped rather than torn down: restarting this effect would re-pay the
-      // 1s startup delay and freeze the remote's preview after every photo.
-      if (isCapturingRef.current) return;
-
-      isCapturing = true;
-      try {
-        const snapshotPath = await takeSnapshot();
-
-        if (snapshotPath) {
-          // Ensure path has file:// prefix for expo-file-system
-          const fileUri = snapshotPath.startsWith('file://') ? snapshotPath : `file://${snapshotPath}`;
-
-          // Read the file and convert to base64
-          try {
-            const base64 = await FileSystem.readAsStringAsync(fileUri, {
-              encoding: FileSystem.EncodingType.Base64,
-            });
-            const frameId = frameIdRef.current++;
-            webRTCService.sendFrameData(frameId, base64, Date.now());
-          } catch {
-            // Ignore read errors
-          }
-
-          // Clean up the temporary snapshot file
-          try {
-            await FileSystem.deleteAsync(fileUri, { idempotent: true });
-          } catch {
-            // Ignore cleanup errors
-          }
-        }
-      } catch (error) {
-        console.error('[CAMERA] Frame capture error:', error);
-      } finally {
-        isCapturing = false;
-      }
-    }, 125); // ~8 FPS
-
-    return () => {
-      clearTimeout(captureStartTimer);
-      clearInterval(captureInterval);
-    };
-  }, [isDataChannelReady, isCameraInitialized, cameraState.isRecording, takeSnapshot, currentStreamMode, zoomOverride, cameraState.zoom]);
-
   // Navigate to remote screen
   const handleGoToRemote = () => {
     router.push('/remote');
@@ -1101,7 +1015,6 @@ export default function CameraScreen() {
       {/* Camera preview with aspect ratio container */}
       <AspectRatioContainer ratio={settings.aspectRatio}>
         {/* Vision camera preview - always used for local preview (supports zoom) */}
-        {/* takeSnapshot captures frames to send to remote device */}
         <Camera
           key={`camera-${cameraKey}`}
           ref={cameraRef}
