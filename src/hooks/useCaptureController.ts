@@ -8,8 +8,6 @@ export interface CaptureControllerOptions {
   takePhoto: (
     onPhotoSaved?: (saved: SavedMedia | null) => void
   ) => Promise<PhotoFile | null>;
-  /** Capture a low-quality preview of the current framing. */
-  takeSnapshot: () => Promise<string | null>;
   /** Take the camera back from WebRTC. Resolves true if WebRTC held it. */
   acquireCamera: () => Promise<boolean>;
   /** Hand the camera back to WebRTC. */
@@ -18,8 +16,6 @@ export interface CaptureControllerOptions {
   onPhotoCaptured: (photo: PhotoFile) => void;
   /** The save finished (later than onPhotoCaptured). */
   onPhotoSaved?: (saved: SavedMedia | null) => void;
-  /** A preview snapshot is ready to send to the remote. */
-  onPreviewReady: (path: string, timestamp: number) => void;
   /** A remote-requested capture finished. */
   onRemoteCaptureComplete: (success: boolean, error?: string) => void;
 }
@@ -64,34 +60,10 @@ export function useCaptureController(options: CaptureControllerOptions) {
       captureOne: async (request: CaptureRequest) => {
         const {
           takePhoto,
-          takeSnapshot,
           onPhotoCaptured,
           onPhotoSaved,
-          onPreviewReady,
           onRemoteCaptureComplete,
         } = optionsRef.current;
-
-        // Timestamped here so a burst keeps capture order on the remote even
-        // if the previews are read off disk out of order.
-        const timestamp = Date.now();
-
-        // Snapshot first: it has to show the framing about to be photographed.
-        let snapshotPath: string | null = null;
-        if (request.notifyRemote) {
-          try {
-            snapshotPath = await takeSnapshot();
-          } catch (error) {
-            console.error('Error taking preview snapshot:', error);
-          }
-        }
-
-        // Handed off here, not after the photo, and deliberately not awaited:
-        // the remote's live preview is dark for the whole cycle, so it needs
-        // this image early enough to show instead of a frozen frame. The
-        // base64 read runs alongside the capture rather than delaying it.
-        if (snapshotPath) {
-          onPreviewReady(snapshotPath, timestamp);
-        }
 
         try {
           const photo = await takePhoto(onPhotoSaved);
