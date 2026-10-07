@@ -16,6 +16,7 @@ import { usePeerConnection } from '../hooks/usePeerConnection';
 import { useSettings } from '../hooks/useSettings';
 import { useVolumeShutter } from '../hooks/useVolumeShutter';
 import { webRTCService } from '../services/WebRTCService';
+import { pairingService } from '../services/PairingService';
 import {
   CameraState,
   Response,
@@ -60,8 +61,13 @@ export default function RemoteScreen() {
     };
   }, [settings.keepScreenAwake]);
 
-  // UI state
-  const [showScanner, setShowScanner] = useState(!initialSessionId);
+  // UI state. Pairing is loaded asynchronously so avoid flashing the QR
+  // scanner before we know whether this controller already remembers a camera.
+  const [showScanner, setShowScanner] = useState(false);
+  const [pairingLoaded, setPairingLoaded] = useState(Boolean(initialSessionId));
+  const [rememberedPairId, setRememberedPairId] = useState<string | null>(null);
+  const [isRestoringPairing, setIsRestoringPairing] = useState(false);
+  const [reconnectTick, setReconnectTick] = useState(0);
   const [remoteState, setRemoteState] = useState<CameraState>(DEFAULT_STATE);
   const [remoteLenses, setRemoteLenses] = useState<LensInfo[]>([]);
   const [videoNeedsRotation, setVideoNeedsRotation] = useState(false);
@@ -88,6 +94,7 @@ export default function RemoteScreen() {
   const framesReceivedRef = useRef(0);
   const autoJoinAttemptedRef = useRef<string | null>(null);
   const connectingSessionRef = useRef<string | null>(null);
+  const rememberedRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleFrameData = useCallback((frameData: FrameDataMessage) => {
     framesReceivedRef.current++;
     // Log every 30 frames (~3 seconds)
@@ -213,7 +220,12 @@ export default function RemoteScreen() {
     setIsDataChannelReady(false);
   }, [cleanupSignaling, closeConnection]);
 
-  const connectToSession = useCallback(async (scannedSessionId: string) => {
+  const connectToSession = useCallback(async (
+    scannedSessionId: string,
+    options: { remembered?: boolean } = {}
+  ) => {
+    const isRememberedReconnect = options.remembered ?? false;
+
     // Not re-entrant: each run registers another pair of Firestore listeners,
     // which would duplicate every offer and candidate delivery.
     if (connectingSessionRef.current) {
@@ -221,18 +233,46 @@ export default function RemoteScreen() {
     }
     connectingSessionRef.current = scannedSessionId;
 
-    console.log('Scanned session ID:', scannedSessionId);
+    console.log(
+      isRememberedReconnect
+        ? `[REMOTE] Reconnecting remembered Pair ID: ${scannedSessionId}`
+        : `Scanned session ID: ${scannedSessionId}`
+    );
 
     try {
       const joined = await joinSession(scannedSessionId);
       if (!joined) {
-        Alert.alert('Error', 'Session not found. Please scan the QR code again.');
         connectingSessionRef.current = null;
+
+        if (isRememberedReconnect) {
+          // The camera may simply be offline or still starting. Keep the saved
+          // Pair ID and retry; QR is only for deliberately pairing a new phone.
+          setIsRestoringPairing(true);
+          setShowScanner(false);
+          if (rememberedRetryTimerRef.current) {
+            clearTimeout(rememberedRetryTimerRef.current);
+          }
+          rememberedRetryTimerRef.current = setTimeout(() => {
+            autoJoinAttemptedRef.current = null;
+            setReconnectTick((value) => value + 1);
+          }, 5000);
+          return;
+        }
+
+        Alert.alert('Error', 'Session not found. Please scan the QR code again.');
         setShowScanner(true);
         if (initialSessionId) {
           router.replace('/remote');
         }
         return;
+      }
+
+      await pairingService.saveRemotePairId(scannedSessionId);
+      setRememberedPairId(scannedSessionId);
+      setIsRestoringPairing(false);
+      if (rememberedRetryTimerRef.current) {
+        clearTimeout(rememberedRetryTimerRef.current);
+        rememberedRetryTimerRef.current = null;
       }
 
       await createConnection();
@@ -254,8 +294,22 @@ export default function RemoteScreen() {
       setShowScanner(false);
     } catch (error) {
       console.error('Error connecting to camera:', error);
-      Alert.alert('Error', 'Failed to connect to camera. Please try again.');
       connectingSessionRef.current = null;
+
+      if (isRememberedReconnect) {
+        setIsRestoringPairing(true);
+        setShowScanner(false);
+        if (rememberedRetryTimerRef.current) {
+          clearTimeout(rememberedRetryTimerRef.current);
+        }
+        rememberedRetryTimerRef.current = setTimeout(() => {
+          autoJoinAttemptedRef.current = null;
+          setReconnectTick((value) => value + 1);
+        }, 5000);
+        return;
+      }
+
+      Alert.alert('Error', 'Failed to connect to camera. Please try again.');
       setShowScanner(true);
       if (initialSessionId) {
         router.replace('/remote');
@@ -274,19 +328,51 @@ export default function RemoteScreen() {
     setRemoteDescription,
   ]);
 
+  // Load the remembered camera once. A route/deep-link Pair ID takes priority;
+  // otherwise the controller automatically returns to its previously paired
+  // camera without opening the scanner.
   useEffect(() => {
-    if (!initialSessionId) {
+    if (initialSessionId) {
+      setPairingLoaded(true);
       return;
     }
 
-    if (autoJoinAttemptedRef.current === initialSessionId) {
+    let cancelled = false;
+    pairingService.getRemotePairId().then((savedPairId) => {
+      if (cancelled) return;
+      setRememberedPairId(savedPairId);
+      setPairingLoaded(true);
+      if (!savedPairId) {
+        setShowScanner(true);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [initialSessionId]);
+
+  useEffect(() => {
+    if (!pairingLoaded) return;
+
+    const targetPairId = initialSessionId ?? rememberedPairId;
+    if (!targetPairId) return;
+
+    if (autoJoinAttemptedRef.current === targetPairId) {
       return;
     }
 
-    autoJoinAttemptedRef.current = initialSessionId;
+    autoJoinAttemptedRef.current = targetPairId;
     setShowScanner(false);
-    connectToSession(initialSessionId);
-  }, [connectToSession, initialSessionId]);
+    setIsRestoringPairing(!initialSessionId);
+    connectToSession(targetPairId, { remembered: !initialSessionId });
+  }, [
+    connectToSession,
+    initialSessionId,
+    pairingLoaded,
+    rememberedPairId,
+    reconnectTick,
+  ]);
 
   // Control handlers
   const handleTakePhoto = useCallback(() => {
@@ -329,8 +415,17 @@ export default function RemoteScreen() {
     router.back();
   };
 
-  // Handle QR scanner button - show scanner to connect to a new camera
-  const handleQRPress = () => {
+  // QR is now an explicit "pair a different camera" action. Normal app
+  // reopen/reconnect never clears the remembered Pair ID.
+  const handleQRPress = async () => {
+    if (rememberedRetryTimerRef.current) {
+      clearTimeout(rememberedRetryTimerRef.current);
+      rememberedRetryTimerRef.current = null;
+    }
+    await pairingService.clearRemotePairId();
+    setRememberedPairId(null);
+    setIsRestoringPairing(false);
+    autoJoinAttemptedRef.current = null;
     clearActiveConnection();
     setShowScanner(true);
     router.replace('/remote');
@@ -398,16 +493,24 @@ export default function RemoteScreen() {
     }
   }, [connectionState]);
 
-  // Cleanup on unmount.
+  // Cleanup on unmount. Persistent pairing is intentionally NOT cleared.
   useEffect(() => {
     return () => {
+      if (rememberedRetryTimerRef.current) {
+        clearTimeout(rememberedRetryTimerRef.current);
+        rememberedRetryTimerRef.current = null;
+      }
       clearActiveConnection();
     };
   }, [clearActiveConnection]);
 
   return (
     <View style={styles.container}>
-      {showScanner ? (
+      {!pairingLoaded ? (
+        <View style={styles.reconnectContainer}>
+          <Text style={styles.reconnectText}>Loading paired camera…</Text>
+        </View>
+      ) : showScanner ? (
         <QRCodeScanner
           onScan={connectToSession}
           onClose={handleBack}
@@ -450,6 +553,15 @@ export default function RemoteScreen() {
               </Text>
             </View>
           )}
+
+          {isRestoringPairing && connectionState !== 'connected' && (
+            <View style={styles.reconnectContainer}>
+              <Text style={styles.reconnectText}>Connecting to paired camera…</Text>
+              {rememberedPairId && (
+                <Text style={styles.reconnectSubtext}>Pair {rememberedPairId}</Text>
+              )}
+            </View>
+          )}
         </>
       )}
     </View>
@@ -460,6 +572,24 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#000',
+  },
+  reconnectContainer: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#000',
+    zIndex: 20,
+  },
+  reconnectText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  reconnectSubtext: {
+    color: '#888',
+    fontSize: 12,
+    marginTop: 8,
+    fontFamily: 'monospace',
   },
   sessionInfo: {
     position: 'absolute',
