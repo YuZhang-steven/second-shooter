@@ -29,7 +29,19 @@ export class RTCPeerConnection {
     send: jest.fn(),
     close: jest.fn(),
   });
-  addTrack = jest.fn();
+
+  private senders: any[] = [];
+  addTrack = jest.fn((track: any) => {
+    const sender: any = {
+      track,
+      replaceTrack: jest.fn(async (nextTrack: any) => {
+        sender.track = nextTrack;
+      }),
+    };
+    this.senders.push(sender);
+    return sender;
+  });
+  getSenders = jest.fn(() => this.senders);
   close = jest.fn();
 }
 
