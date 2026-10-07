@@ -170,12 +170,22 @@ class WebRTCService {
   private setupDataChannel(channel: any): void {
     this.dataChannel = channel;
 
-    channel.onopen = () => {
+    // A restored peer can deliver ondatachannel after SCTP has already moved to
+    // "open". In that race the native onopen event may have fired before these
+    // JS handlers were attached, leaving React stuck at isDataChannelReady=false
+    // even though the channel is usable. Make readiness level-triggered as well
+    // as event-triggered.
+    let openNotified = false;
+    const notifyOpen = () => {
+      if (openNotified || this.dataChannel !== channel) return;
+      openNotified = true;
       console.log('Data channel opened');
       if (this.onDataChannelOpenCallback) {
         this.onDataChannelOpenCallback();
       }
     };
+
+    channel.onopen = notifyOpen;
 
     channel.onclose = () => {
       console.log('Data channel closed');
@@ -210,6 +220,11 @@ class WebRTCService {
     channel.onerror = (error: any) => {
       console.error('Data channel error:', error);
     };
+
+    if (channel.readyState === 'open') {
+      console.log('[WebRTC] Data channel was already open when handlers attached');
+      setTimeout(notifyOpen, 0);
+    }
   }
 
   // Type guards for messages
@@ -802,6 +817,35 @@ class WebRTCService {
       console.log('[WebRTC] Recreating command data channel for recovery');
       this.createDataChannel();
     }
+  }
+
+  /**
+   * Start a fresh command channel for a reconnecting controller.
+   *
+   * A controller process that was suspended/killed can come back with a new
+   * RTCPeerConnection while the camera still believes the previous SCTP channel
+   * is open. Media/ICE may reconnect, but that stale channel can never deliver
+   * commands to the new controller. Replace it before the recovery offer so the
+   * new SDP explicitly negotiates a fresh command channel.
+   */
+  replaceDataChannelForRecovery(): void {
+    if (!this.peerConnection) {
+      return;
+    }
+
+    const previous = this.dataChannel;
+    this.dataChannel = null;
+
+    if (previous) {
+      try {
+        previous.close();
+      } catch (error) {
+        console.warn('[WebRTC] Failed to close stale command data channel:', error);
+      }
+    }
+
+    console.log('[WebRTC] Creating fresh command data channel for controller recovery');
+    this.createDataChannel();
   }
 
   // Whether there is a connection to renegotiate onto at all. close() can land
