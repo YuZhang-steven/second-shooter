@@ -498,7 +498,10 @@ export default function CameraScreen() {
   const isFocusedRef = useRef(isFocused);
   isFocusedRef.current = isFocused;
 
-  const cameraIsActive = isFocused && !cameraState.isRecording && !isWebRTCUsingCamera;
+  // Vision Camera must stay active for the entire video recording. WebRTC is
+  // already paused before recording starts, so recording itself is not a
+  // reason to deactivate this camera session.
+  const cameraIsActive = isFocused && !isWebRTCUsingCamera;
 
   // Recover from a lost camera handoff
   //
