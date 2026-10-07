@@ -32,6 +32,7 @@ export type Command =
   | { type: 'STOP_RECORDING' }
   | { type: 'SET_ZOOM'; level: number }
   | { type: 'SET_FLASH'; mode: FlashMode }
+  | { type: 'SET_CAPTURE_MODE'; mode: CaptureMode }
   | { type: 'SWITCH_CAMERA' }
   | { type: 'GET_STATE' };
 
