@@ -13,9 +13,11 @@ interface UseSignalingReturn {
   joinSession: (sessionId: string) => Promise<boolean>;
   sendOffer: (offer: SignalingOffer) => Promise<void>;
   sendAnswer: (answer: SignalingAnswer) => Promise<void>;
+  requestReconnect: (connectionId: string) => Promise<void>;
   addIceCandidate: (candidate: IceCandidate) => Promise<void>;
   onOffer: (callback: (offer: SignalingOffer) => void) => void;
   onAnswer: (callback: (answer: SignalingAnswer) => void) => void;
+  onReconnectRequest: (callback: (connectionId: string) => void) => void;
   onIceCandidate: (callback: (candidate: IceCandidate) => void) => void;
   cleanup: () => void;
 }
@@ -118,6 +120,17 @@ export function useSignaling(role: Role): UseSignalingReturn {
     }
   }, []);
 
+  // Ask the camera to publish a fresh offer for this controller app/peer
+  // generation. Used only for remembered reconnects, not the first QR join.
+  const requestReconnect = useCallback(async (connectionId: string): Promise<void> => {
+    const currentSessionId = sessionIdRef.current;
+    if (!currentSessionId) {
+      throw new Error('No active session');
+    }
+
+    await signalingService.requestReconnect(currentSessionId, connectionId);
+  }, []);
+
   // Add ICE candidate
   const addIceCandidate = useCallback(async (candidate: IceCandidate): Promise<void> => {
     const currentSessionId = sessionIdRef.current;
@@ -162,6 +175,18 @@ export function useSignaling(role: Role): UseSignalingReturn {
     unsubscribersRef.current.push(unsubscribe);
   }, []);
 
+  // Camera-side listener for a remembered controller process returning.
+  const onReconnectRequest = useCallback((callback: (connectionId: string) => void): void => {
+    const currentSessionId = sessionIdRef.current;
+    if (!currentSessionId) {
+      console.error('No active session');
+      return;
+    }
+
+    const unsubscribe = signalingService.onReconnectRequest(currentSessionId, callback);
+    unsubscribersRef.current.push(unsubscribe);
+  }, []);
+
   // Listen for ICE candidates
   const onIceCandidate = useCallback((callback: (candidate: IceCandidate) => void): void => {
     const currentSessionId = sessionIdRef.current;
@@ -184,9 +209,11 @@ export function useSignaling(role: Role): UseSignalingReturn {
     joinSession,
     sendOffer,
     sendAnswer,
+    requestReconnect,
     addIceCandidate,
     onOffer,
     onAnswer,
+    onReconnectRequest,
     onIceCandidate,
     cleanup,
   };
