@@ -518,3 +518,59 @@ Native dependency/config changed?
 Only JS/TS changed?
     YES → start/keep Metro running; no reinstall
 ```
+
+---
+
+# 11. Unfinished-video protection (Release testing)
+
+The camera phone now tries to keep recordings already captured if its app is
+accidentally left without pressing **Stop**.
+
+- **Camera app → Home / another app:** actual `AppState=background` requests
+  `stopRecording()`. Vision Camera finalizes the current video, then the app
+  imports it into Photos (or the selected save folder).
+- **Camera app → Settings / Gallery / Remote screen:** the app awaits video
+  finalization/save before navigating away.
+- **Control Center briefly shown:** `AppState=inactive` alone does *not*
+  auto-stop; turning off Wi-Fi is not a reason to end a recording.
+- **Controller phone leaves Second Shooter:** camera recording continues,
+  as before; the camera phone has not left its app.
+- **Photos import interrupted:** Vision Camera now writes finished video files
+  first into `Documents/SecondShooterRecordings/`, not the temporary cache.
+  Files are removed from that folder **only after** their import succeeds.
+  On the next launch, finalized staged video files are retried automatically.
+
+Important limitation: iOS can kill/force-quit the app without giving JS or
+the camera recorder enough time to finish a file. An unfinalized movie may not
+be playable or recoverable. This improvement is best-effort, **not** guaranteed
+recovery from an immediate force-quit, phone shutdown, crash, or depleted storage.
+
+## Physical-device tests
+
+Install the current Release build on both iPhones (on Xcode 27, opening
+`ios/SecondShooter.xcworkspace` and choosing Run configuration **Release**
+avoids the older Expo CLI device-discovery issue).
+
+1. Camera A records for 20–30 seconds; press Home on **A** without tapping
+   Stop. Reopen A. Its clip should appear in Photos.
+2. Camera A records again; tap Settings or Camera→Remote on **A**. The
+   recorder should finalize/save before the navigation happens.
+3. Camera A starts recording via Controller B. Background only **B**;
+   recording on A must continue until an explicit Stop on A or B.
+4. A keeps recording while B loses Wi-Fi/cellular; recording must continue.
+5. While recording on A, briefly show Control Center and return. The
+   `inactive` transition should not itself trigger auto-stop.
+6. Simulate an unsuccessful Photos import (e.g. deny/revoke permission in a
+   controlled test), then restart A and confirm recovery is retried after
+   permission is restored. Avoid deleting the app, because uninstalling it
+   also removes the recovery directory.
+
+Expected logs include:
+
+```text
+[Media] Recovered interrupted video save: ...
+[CAMERA] Recovered 1 interrupted recording(s)
+```
+
+Use `npm test` for the MediaService recovery regression tests. Native iOS
+background behavior still requires a physical Release-device test.
