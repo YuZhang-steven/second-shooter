@@ -574,3 +574,64 @@ Expected logs include:
 
 Use `npm test` for the MediaService recovery regression tests. Native iOS
 background behavior still requires a physical Release-device test.
+
+
+---
+
+# 12. Remembered controller stuck on "Connecting to paired camera"
+
+After the remembered Pair ID is loaded, the controller requests a new
+12-character `connectionId` in Firestore. That request requires the
+**updated Firestore security rules**. Installing the app on an iPhone does not
+publish Firestore rules.
+
+Before testing remembered reconnection, deploy:
+
+```bash
+firebase deploy --only firestore:rules
+```
+
+Or open Firebase Console → Firestore Database → Rules, copy the current
+`firestore.rules`, and click **Publish**. The valid session fields must include
+`connectionId` and `reconnectRequestedAt`.
+
+The controller now logs these stages:
+
+```text
+[REMOTE] Reconnecting remembered Pair ID: HGE9UN
+[REMOTE] Requesting fresh controller generation ...
+[REMOTE] Firestore accepted fresh controller request
+[REMOTE] Received fresh offer from camera
+[REMOTE] Published answer for camera
+[REMOTE] STATE_UPDATE: ...
+```
+
+The camera logs:
+
+```text
+[CAMERA] Rebuilding peer for controller generation ...
+[CAMERA] Published fresh offer for controller generation ...
+```
+
+If the controller has no matching offer or camera state for 15 seconds, it
+restarts the remembered connection automatically. Firestore permission-denied
+errors appear in the connection banner rather than being silently retried.
+
+The connecting status is now a small banner, **not a black full-screen overlay**:
+Settings, Camera/Remote mode switch, and QR/pair actions remain visible and
+clickable. Tap **Retry now** to request an immediate fresh connection.
+
+The `functions/not-found` warning about optional TURN credentials is a
+separate STUN-only fallback. It does not explain failure to publish a Firestore
+reconnect request.
+
+Physical test:
+1. Keep Camera A in the Camera screen with internet.
+2. Start/reopen Controller B with the saved Pair ID.
+3. Confirm it logs `Firestore accepted fresh controller request` and then
+   `Received fresh offer from camera`.
+4. Verify B gets an actual `STATE_UPDATE` (not merely green ICE status).
+5. Try Controller B → Camera mode → Remote mode; it must reconnect with a fresh
+   generation.
+6. Leave B backgrounded for several minutes, then return; the recording on A
+   must remain under A's control and B should reconnect without a new QR.
