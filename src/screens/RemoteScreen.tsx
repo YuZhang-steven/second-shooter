@@ -164,6 +164,7 @@ export default function RemoteScreen() {
           stateSyncTimeoutRef.current = null;
         }
         setIsRestoringPairing(false);
+        setHasSyncedCameraState(true);
         setRemoteState(response.state);
         if (response.lenses) {
           setRemoteLenses(response.lenses);
@@ -219,6 +220,9 @@ export default function RemoteScreen() {
 
   // Track data channel ready state
   const [isDataChannelReady, setIsDataChannelReady] = useState(false);
+  // ICE/media green is not proof of functioning controls. Require a real
+  // STATE_UPDATE from the camera on the CURRENT command channel.
+  const [hasSyncedCameraState, setHasSyncedCameraState] = useState(false);
 
   // Handle data channel open
   const handleDataChannelOpen = useCallback(() => {
@@ -232,6 +236,7 @@ export default function RemoteScreen() {
   const handleDataChannelClose = useCallback(() => {
     console.log('Data channel closed on controller');
     setIsDataChannelReady(false);
+    setHasSyncedCameraState(false);
   }, []);
 
   // iOS can suspend JS while the native WebRTC/SCTP connection remains alive.
@@ -284,6 +289,7 @@ export default function RemoteScreen() {
     closeConnection();
     connectingSessionRef.current = null;
     setIsDataChannelReady(false);
+    setHasSyncedCameraState(false);
   }, [cleanupSignaling, closeConnection]);
 
   const restartRememberedConnection = useCallback(() => {
@@ -578,9 +584,11 @@ export default function RemoteScreen() {
     sendCommand({ type: 'SET_ZOOM', level: zoom });
   }, [sendCommand]);
 
+  const controlReady = isDataChannelReady && hasSyncedCameraState;
+
   // Volume button shutter
   const handleVolumeShutter = useCallback(() => {
-    if (connectionState !== 'connected' || !isDataChannelReady) return;
+    if (!controlReady) return;
     if (remoteState.captureMode === 'photo') {
       handleTakePhoto();
     } else if (remoteState.isRecording) {
@@ -588,7 +596,7 @@ export default function RemoteScreen() {
     } else {
       handleStartRecording();
     }
-  }, [connectionState, isDataChannelReady, remoteState.captureMode, remoteState.isRecording, handleTakePhoto, handleStartRecording, handleStopRecording]);
+  }, [controlReady, remoteState.captureMode, remoteState.isRecording, handleTakePhoto, handleStartRecording, handleStopRecording]);
 
   useVolumeShutter({ onShutterPress: handleVolumeShutter, enabled: !showScanner });
 
@@ -602,9 +610,10 @@ export default function RemoteScreen() {
   useEffect(() => {
     if (!isForeground) return;
     if (!isDataChannelReady || showScanner) return;
-    if (connectionState !== 'connected') return;
 
-    console.log('Connected/foreground with data channel ready, requesting camera state');
+    // SCTP can be healthy while the native media/ICE state is late or stale.
+    // Probe the camera directly; only its response enables the controls.
+    console.log('Foreground with DataChannel open, requesting camera state');
     sendCommand({ type: 'GET_STATE' });
 
     // "connected" + "open" are native transport states, not proof that the
@@ -650,11 +659,11 @@ export default function RemoteScreen() {
   useEffect(() => {
     if (connectionState !== 'connected') {
       setIsCameraCapturing(false);
-      if (rememberedPairId) {
+      if (rememberedPairId && !controlReady) {
         setIsRestoringPairing(true);
       }
     }
-  }, [connectionState, rememberedPairId]);
+  }, [connectionState, rememberedPairId, controlReady]);
 
   // Cleanup on unmount. Persistent pairing is intentionally NOT cleared.
   useEffect(() => {
@@ -672,10 +681,13 @@ export default function RemoteScreen() {
     };
   }, [clearActiveConnection]);
 
-  const effectiveConnectionState =
-    connectionState === 'connected' && !isDataChannelReady
+  const effectiveConnectionState = controlReady
+    ? 'connected'
+    : isRestoringPairing
       ? 'connecting'
-      : connectionState;
+      : connectionState === 'connected'
+        ? 'connecting'
+        : connectionState;
 
   return (
     <View style={styles.container}>
@@ -709,7 +721,7 @@ export default function RemoteScreen() {
             onSwitchCamera={handleSwitchCamera}
             onZoomChange={handleZoomChange}
             onCaptureModeChange={handleCaptureModeChange}
-            disabled={connectionState !== 'connected' || !isDataChannelReady}
+            disabled={!controlReady}
             onSettingsPress={handleSettingsPress}
             onQRPress={handleQRPress}
             onModeToggle={handleModeToggle}
