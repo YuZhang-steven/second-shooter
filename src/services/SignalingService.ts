@@ -20,7 +20,7 @@ import {
   OFFER_CANDIDATES_SUBCOLLECTION,
   ANSWER_CANDIDATES_SUBCOLLECTION,
 } from '../config/firebase';
-import { generateSessionId, isValidSessionId, isValidConnectionId } from '../utils/sessionId';
+import { generateSessionId, generateConnectionId, isValidSessionId, isValidConnectionId } from '../utils/sessionId';
 import { SignalingOffer, SignalingAnswer, IceCandidate } from '../types';
 
 // Signaling documents are still temporary, but an active camera can refresh
@@ -46,6 +46,10 @@ class SignalingService {
   private processedAnswerSdp: string | null = null;
   private processedReconnectConnectionId: string | null = null;
   private expectedConnectionId: string | null = null;
+  // Each fresh controller peer gets a unique ICE candidate namespace. Old
+  // candidates remain in Firestore until TTL deletion, but must never be
+  // applied to a newly negotiated peer generation.
+  private activeConnectionId: string | null = null;
 
   /**
    * A recording can outlive the signaling document. Firestore TTL may delete
@@ -90,6 +94,7 @@ class SignalingService {
     this.processedAnswerSdp = null;
     this.processedReconnectConnectionId = null;
     this.expectedConnectionId = null;
+    this.activeConnectionId = null;
 
     const normalizedPreferred = preferredSessionId?.trim().toUpperCase();
     const sessionId =
@@ -144,6 +149,7 @@ class SignalingService {
     this.processedOfferSdp = null;
     this.processedAnswerSdp = null;
     this.expectedConnectionId = null;
+    this.activeConnectionId = null;
 
     const sessionRef = doc(db, SESSIONS_COLLECTION, sessionId);
     const sessionDoc = await getDoc(sessionRef);
@@ -168,6 +174,7 @@ class SignalingService {
     }
 
     this.expectedConnectionId = connectionId;
+    this.activeConnectionId = connectionId;
     this.processedOfferSdp = null;
 
     const sessionRef = doc(db, SESSIONS_COLLECTION, sessionId);
@@ -258,6 +265,11 @@ class SignalingService {
 
     const unsubscribe = onSnapshot(sessionRef, (snapshot) => {
       const data = snapshot.data();
+      // Rebuilding the camera WebRTC peer must never consume an answer from
+      // an older controller generation.
+      if (this.activeConnectionId && data?.connectionId !== this.activeConnectionId) {
+        return;
+      }
       if (data?.answer && data.answer.sdp !== this.processedAnswerSdp) {
         // Mark this answer as processed to avoid duplicate handling
         this.processedAnswerSdp = data.answer.sdp;
@@ -290,12 +302,23 @@ class SignalingService {
       subcollection
     );
 
-    await addDoc(candidatesRef, {
+    const record = {
       candidate: candidate.candidate,
       sdpMLineIndex: candidate.sdpMLineIndex,
       sdpMid: candidate.sdpMid,
       expireAt: sessionExpireAt(),
-    });
+    };
+
+    if (this.activeConnectionId) {
+      // Namespaced ID, unchanged document fields: no Firestore rule migration.
+      await setDoc(
+        doc(candidatesRef, `${this.activeConnectionId}_${generateConnectionId()}`),
+        record
+      );
+    } else {
+      // First QR pairing keeps the existing simple auto-ID behavior.
+      await addDoc(candidatesRef, record);
+    }
   }
 
   // Camera watches for a returning remembered controller. A new connection
@@ -316,6 +339,8 @@ class SignalingService {
         connectionId !== this.processedReconnectConnectionId
       ) {
         this.processedReconnectConnectionId = connectionId;
+        this.activeConnectionId = connectionId;
+        this.processedAnswerSdp = null;
         callback(connectionId);
       }
     });
@@ -345,6 +370,14 @@ class SignalingService {
     const unsubscribe = onSnapshot(candidatesRef, (snapshot) => {
       snapshot.docChanges().forEach((change) => {
         if (change.type === 'added') {
+          const candidateId: string | undefined = change.doc.id;
+          const expectedId = this.activeConnectionId;
+          if (expectedId && !candidateId?.startsWith(`${expectedId}_`)) {
+            return; // old ICE generation, cannot apply to current peer
+          }
+          if (!expectedId && candidateId?.includes('_')) {
+            return; // don't replay candidates from a former remembered peer
+          }
           const data = change.doc.data();
           callback({
             candidate: data.candidate,
@@ -388,6 +421,7 @@ class SignalingService {
     this.processedAnswerSdp = null;
     this.processedReconnectConnectionId = null;
     this.expectedConnectionId = null;
+    this.activeConnectionId = null;
   }
 
   // Get current session ID
