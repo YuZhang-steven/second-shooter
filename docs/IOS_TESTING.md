@@ -635,3 +635,27 @@ Physical test:
    generation.
 6. Leave B backgrounded for several minutes, then return; the recording on A
    must remain under A's control and B should reconnect without a new QR.
+
+
+## Controller launch must not mount Camera
+
+The Expo entry route is `app/index.tsx`. Previously a remembered controller
+would briefly initialize Vision Camera *and* could start camera-side Firebase
+session restoration before the saved Remote role finished loading.
+
+The startup route now checks the saved role first. If it is `remote`, it
+navigates to `/remote` **without mounting Vision Camera or auto-arming any
+camera-side session**. This avoids two competing signaling lifecycles in the
+same app process.
+
+For a controller that has already been paired and saved as Remote, the native
+Xcode console should show:
+
+```text
+[CAMERA] Dedicated controller: skip camera initialization
+[REMOTE] Reconnecting remembered Pair ID: ...
+```
+
+It should **not** show `VisionCamera.configureDevice` for that controller
+during normal cold startup, and the camera-side auto-arm should only happen on
+the actual camera phone.
