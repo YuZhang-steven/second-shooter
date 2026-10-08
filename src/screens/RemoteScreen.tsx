@@ -37,12 +37,20 @@ const RECONNECT_RETRY_DELAY_MS = 5000;
 // A Firestore setDoc can wait for connectivity for a long time. A remembered
 // pairing must show a meaningful status and retry rather than hanging forever.
 async function withReconnectTimeout<T>(task: Promise<T>, label: string): Promise<T> {
-  return Promise.race([
-    task,
-    new Promise<T>((_, reject) =>
-      setTimeout(() => reject(new Error(`${label} timed out after 15 seconds`)), RECONNECT_ATTEMPT_TIMEOUT_MS)
-    ),
-  ]);
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      task,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${label} timed out after 15 seconds`)),
+          RECONNECT_ATTEMPT_TIMEOUT_MS
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 const DEFAULT_STATE: CameraState = {
