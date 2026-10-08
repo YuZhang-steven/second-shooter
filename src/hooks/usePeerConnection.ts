@@ -54,6 +54,23 @@ export function usePeerConnection({
   const connectionPromiseRef = useRef<Promise<void> | null>(null);
   const generationRef = useRef<number | null>(null);
 
+  // WebRTCService installs message handlers when a peer is created, which may
+  // be hours before Video/Recording state changes. Always forward events to
+  // the CURRENT React callbacks, not closures from the first pairing render.
+  // Otherwise a successful reconnect can still report default Photo state.
+  const onCommandRef = useRef(onCommand);
+  const onResponseRef = useRef(onResponse);
+  const onRemoteStreamRef = useRef(onRemoteStream);
+  const onIceCandidateRef = useRef(onIceCandidate);
+  const onDataChannelOpenRef = useRef(onDataChannelOpen);
+  const onDataChannelCloseRef = useRef(onDataChannelClose);
+  onCommandRef.current = onCommand;
+  onResponseRef.current = onResponse;
+  onRemoteStreamRef.current = onRemoteStream;
+  onIceCandidateRef.current = onIceCandidate;
+  onDataChannelOpenRef.current = onDataChannelOpen;
+  onDataChannelCloseRef.current = onDataChannelClose;
+
   // Cleanup on unmount
   //
   // WebRTCService is a singleton but RemoteScreen is exported from three routes
@@ -94,31 +111,29 @@ export function usePeerConnection({
 
       webRTCService.onRemoteStream((stream) => {
         setRemoteStream(stream);
-        onRemoteStream?.(stream);
+        onRemoteStreamRef.current?.(stream);
       });
 
       webRTCService.onIceCandidate((candidate) => {
-        onIceCandidate?.(candidate);
+        onIceCandidateRef.current?.(candidate);
       });
 
-      if (onCommand) {
-        webRTCService.onCommand(onCommand);
-      }
-
-      if (onResponse) {
-        webRTCService.onResponse(onResponse);
+      if (role === 'camera') {
+        webRTCService.onCommand((command) => onCommandRef.current?.(command));
+      } else {
+        webRTCService.onResponse((response) => onResponseRef.current?.(response));
       }
 
       webRTCService.onDataChannelOpen(() => {
         console.log('Data channel is now ready');
         setIsDataChannelReady(true);
-        onDataChannelOpen?.();
+        onDataChannelOpenRef.current?.();
       });
 
       webRTCService.onDataChannelClose(() => {
         console.log('Data channel is no longer ready');
         setIsDataChannelReady(false);
-        onDataChannelClose?.();
+        onDataChannelCloseRef.current?.();
       });
 
       // Camera device creates the data channel
@@ -139,7 +154,7 @@ export function usePeerConnection({
       connectionPromiseRef.current = null;
       throw error;
     }
-  }, [role, onCommand, onResponse, onRemoteStream, onIceCandidate, onDataChannelOpen, onDataChannelClose]);
+  }, [role]);
 
   // Create SDP offer (camera device)
   const createOffer = useCallback(async (
