@@ -28,6 +28,7 @@ import {
   FrameDataMessage,
 } from '../types';
 import { parseSessionIdFromInput } from '../../shared/session-link';
+import { generateConnectionId } from '../utils/sessionId';
 
 const DEFAULT_STATE: CameraState = {
   zoom: 1,
@@ -86,6 +87,7 @@ export default function RemoteScreen() {
     sessionId,
     joinSession,
     sendAnswer,
+    requestReconnect,
     onOffer,
     addIceCandidate: addSignalingIceCandidate,
     onIceCandidate: listenForIceCandidate,
@@ -185,6 +187,7 @@ export default function RemoteScreen() {
   const handleDataChannelOpen = useCallback(() => {
     console.log('Data channel is now ready');
     setIsDataChannelReady(true);
+    setIsRestoringPairing(false);
     webRTCService.onFrameData(handleFrameData);
   }, [handleFrameData]);
 
@@ -203,6 +206,7 @@ export default function RemoteScreen() {
     if (nativeReady && !isDataChannelReady) {
       console.log('[REMOTE] Restoring DataChannel readiness from native state');
       setIsDataChannelReady(true);
+      setIsRestoringPairing(false);
       webRTCService.onFrameData(handleFrameData);
     }
   }, [isForeground, isDataChannelReady, handleFrameData]);
@@ -286,7 +290,9 @@ export default function RemoteScreen() {
       await pairingService.saveRemotePairId(scannedSessionId);
       await pairingService.setPreferredMode('remote');
       setRememberedPairId(scannedSessionId);
-      setIsRestoringPairing(false);
+      if (!isRememberedReconnect) {
+        setIsRestoringPairing(false);
+      }
       if (rememberedRetryTimerRef.current) {
         clearTimeout(rememberedRetryTimerRef.current);
         rememberedRetryTimerRef.current = null;
@@ -298,6 +304,15 @@ export default function RemoteScreen() {
         console.log('Received ICE candidate from camera');
         await addPeerIceCandidate(candidate);
       });
+
+      // A remembered controller is a new peer generation after a long
+      // suspension/relaunch. Invalidate stale SDP first, then wait only for the
+      // camera's fresh offer for this generation.
+      if (isRememberedReconnect) {
+        const connectionId = generateConnectionId();
+        console.log(`[REMOTE] Requesting fresh controller generation ${connectionId}`);
+        await requestReconnect(connectionId);
+      }
 
       onOffer(async (offer) => {
         console.log('Received offer from camera');
@@ -342,6 +357,7 @@ export default function RemoteScreen() {
     onOffer,
     router,
     sendAnswer,
+    requestReconnect,
     setRemoteDescription,
   ]);
 
@@ -509,8 +525,11 @@ export default function RemoteScreen() {
   useEffect(() => {
     if (connectionState !== 'connected') {
       setIsCameraCapturing(false);
+      if (rememberedPairId) {
+        setIsRestoringPairing(true);
+      }
     }
-  }, [connectionState]);
+  }, [connectionState, rememberedPairId]);
 
   // Cleanup on unmount. Persistent pairing is intentionally NOT cleared.
   useEffect(() => {
@@ -522,6 +541,11 @@ export default function RemoteScreen() {
       clearActiveConnection();
     };
   }, [clearActiveConnection]);
+
+  const effectiveConnectionState =
+    connectionState === 'connected' && !isDataChannelReady
+      ? 'connecting'
+      : connectionState;
 
   return (
     <View style={styles.container}>
@@ -538,7 +562,7 @@ export default function RemoteScreen() {
         <>
           <HybridPreview
             stream={remoteStream}
-            connectionState={connectionState}
+            connectionState={effectiveConnectionState}
             streamMode={streamMode}
             latestFrame={latestFrame}
             facing={remoteState.facing}
@@ -573,7 +597,7 @@ export default function RemoteScreen() {
             </View>
           )}
 
-          {isRestoringPairing && connectionState !== 'connected' && (
+          {isRestoringPairing && !isDataChannelReady && (
             <View style={styles.reconnectContainer}>
               <Text style={styles.reconnectText}>Connecting to paired camera…</Text>
               {rememberedPairId && (
