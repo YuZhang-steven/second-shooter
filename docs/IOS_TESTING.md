@@ -659,3 +659,54 @@ Xcode console should show:
 It should **not** show `VisionCamera.configureDevice` for that controller
 during normal cold startup, and the camera-side auto-arm should only happen on
 the actual camera phone.
+
+
+---
+
+# 13. Camera green, controller stuck disconnected after Firestore rules publish
+
+A fresh controller generation is accepted by Firestore, but the camera's
+historical green badge originally meant only "SDP answer received" rather than
+an open command DataChannel. Both peers could also become stuck in a retry
+storm when a new controller reconnect request arrived while the camera was
+still rebuilding its earlier peer.
+
+The connection recovery logic now:
+
+- queues the newest controller reconnect generation instead of dropping it;
+- does not let camera ICE restart offers race the fresh-generation offer;
+- tags candidate **document IDs** with their generation while keeping
+  Firestore document fields unchanged (no new rules deployment);
+- ignores replayed ICE candidates and SDP answers from older generations;
+- ignores native WebRTC events from discarded peer connections;
+- allows up to 45 seconds for the new generation to complete native setup
+  before starting another generation;
+- forwards DataChannel messages to the **latest** camera state handler;
+- only displays the camera's green Connected badge after ICE and DataChannel
+  are both ready;
+- only enables remote capture after DataChannel open **and** an actual
+  `STATE_UPDATE` response from Camera, even if native ICE status is stale;
+- leaves Settings and Camera mode accessible from the reconnect banner.
+
+**No further Firebase rules deployment is required for this revision** if
+section 12's rules are already published.
+
+## Physical Release test
+
+1. Leave Camera A open (not in background) with internet.
+2. Open Remote B with the saved Pair ID (no QR).
+3. Check both native Xcode consoles. Remote should report
+   `Firestore accepted fresh controller request`, then
+   `Received fresh offer from camera`, then
+   `Published answer for camera`.
+4. Camera should report `Published fresh offer for controller generation`;
+   **do not** rely on the green camera badge until DataChannel is ready.
+5. Remote must receive `[REMOTE] STATE_UPDATE` before capture controls turn
+   on. If still reconnecting, Retry now / Settings / Camera mode must work.
+6. Close Remote B for several minutes and reopen it.
+7. While recording on A, reconnect B and verify B gets Video + isRecording
+   state and Stop command works, without interrupting the ongoing clip.
+
+If the sequence fails, collect both phones' log lines beginning with
+`[REMOTE]`, `[CAMERA]`, `[Signaling]`, `[WebRTC]`, or
+`Data channel`; the last successful stage identifies the failure.
