@@ -64,6 +64,14 @@ function toFileUri(path: string): string {
   return path.startsWith('file://') ? path : `file://${path}`;
 }
 
+// iOS can represent the same sandbox path as /var/mobile/... or
+// /private/var/mobile/.... Normalize both forms before deciding whether a
+// finished native video belongs to our recoverable Documents directory.
+function normalizeLocalPath(path: string): string {
+  const withoutScheme = path.startsWith('file://') ? path.slice(7) : path;
+  return withoutScheme.replace(/^\/private(?=\/var\/)/, '');
+}
+
 class MediaService {
   // Serialises background saves so a burst lands in the gallery in capture
   // order instead of firing concurrent MediaStore writes
@@ -148,7 +156,10 @@ class MediaService {
   }
 
   private isPendingVideo(path: string): boolean {
-    return Boolean(PENDING_VIDEO_DIR && toFileUri(path).startsWith(PENDING_VIDEO_DIR));
+    return Boolean(
+      PENDING_VIDEO_DIR &&
+      normalizeLocalPath(path).startsWith(normalizeLocalPath(PENDING_VIDEO_DIR))
+    );
   }
 
   private pendingVideoRecovery: Promise<number> | null = null;
