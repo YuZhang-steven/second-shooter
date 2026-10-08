@@ -35,14 +35,30 @@ service cloud.firestore {
         && desc.sdp.size() < 20000;
     }
 
+    function isValidConnectionId(connectionId) {
+      return connectionId is string
+        && connectionId.matches('[A-HJ-NP-Z2-9]{12}');
+    }
+
     // Full document shape after the write (merge writes are validated
     // against the resulting document, so this covers partial updates too).
     function isValidSessionDoc() {
-      return request.resource.data.keys().hasOnly(['createdAt', 'expireAt', 'status', 'offer', 'answer'])
+      return request.resource.data.keys().hasOnly([
+          'createdAt',
+          'expireAt',
+          'status',
+          'offer',
+          'answer',
+          'connectionId',
+          'reconnectRequestedAt'
+        ])
         && isValidExpiry(request.resource.data.expireAt)
         && request.resource.data.status in ['waiting', 'offer_sent', 'connected']
         && (!('offer' in request.resource.data) || isValidSdp(request.resource.data.offer, 'offer'))
-        && (!('answer' in request.resource.data) || isValidSdp(request.resource.data.answer, 'answer'));
+        && (!('answer' in request.resource.data) || isValidSdp(request.resource.data.answer, 'answer'))
+        && (!('connectionId' in request.resource.data) || isValidConnectionId(request.resource.data.connectionId))
+        && (!('reconnectRequestedAt' in request.resource.data)
+          || request.resource.data.reconnectRequestedAt is timestamp);
     }
 
     function isValidCandidate() {
