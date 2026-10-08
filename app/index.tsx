@@ -72,18 +72,27 @@ export default function CameraScreen() {
   const router = useRouter();
   const isFocused = useIsFocused();
 
-  // On a dedicated controller phone, reopen directly into Remote mode. This is
-  // only a navigation preference; the remembered Pair ID remains independent.
-  const startupRoleCheckedRef = useRef(false);
+  // Resolve the remembered role BEFORE mounting Vision Camera or restoring a
+  // camera-side signaling session. The Camera route is the Expo entry route even
+  // on a dedicated controller phone. Without this guard the controller briefly
+  // mounts Vision Camera and may auto-arm an old camera Pair ID while navigating
+  // to /remote, racing the real controller's shared signaling singleton.
+  const [cameraStartupReady, setCameraStartupReady] = useState(false);
   useEffect(() => {
-    if (startupRoleCheckedRef.current) return;
-    startupRoleCheckedRef.current = true;
-
+    let cancelled = false;
     pairingService.getPreferredMode().then((mode) => {
+      if (cancelled) return;
       if (mode === 'remote') {
+        console.log('[CAMERA] Dedicated controller: skip camera initialization');
         router.replace('/remote');
+      } else {
+        setCameraStartupReady(true);
       }
+    }).catch((error) => {
+      console.warn('[CAMERA] Could not read preferred role, opening camera:', error);
+      if (!cancelled) setCameraStartupReady(true);
     });
+    return () => { cancelled = true; };
   }, [router]);
 
   // Permissions
@@ -850,6 +859,9 @@ export default function CameraScreen() {
   const autoArmPairingAttemptedRef = useRef(false);
   useEffect(() => {
     if (autoArmPairingAttemptedRef.current) return;
+    // Do not race the controller with camera-side Firebase/WebRTC setup while
+    // the launch route is still deciding whether this phone is the controller.
+    if (!cameraStartupReady) return;
     if (!hasCameraPermission || !hasMicPermission) return;
 
     autoArmPairingAttemptedRef.current = true;
@@ -866,7 +878,7 @@ export default function CameraScreen() {
     return () => {
       cancelled = true;
     };
-  }, [hasCameraPermission, hasMicPermission, startRemoteSession]);
+  }, [cameraStartupReady, hasCameraPermission, hasMicPermission, startRemoteSession]);
 
   // QR is now only needed for the first pairing, or to show the existing Pair
   // ID for troubleshooting. A remembered session always reuses the same ID.
@@ -1288,6 +1300,16 @@ export default function CameraScreen() {
   }, [cameraState.captureMode, cameraState.isRecording, settings.timer, actuallyTakePhoto, handleStartRecording, handleStopRecording]);
 
   useVolumeShutter({ onShutterPress: handleVolumeShutter, enabled: !showQR });
+
+  // On controller startup, render neither Vision Camera nor the camera
+  // permission UI. Navigation to /remote runs as soon as the stored role loads.
+  if (!cameraStartupReady) {
+    return (
+      <View style={styles.loadingContainer}>
+        <Text style={styles.loadingText}>Opening Second Shooter…</Text>
+      </View>
+    );
+  }
 
   if (!hasCameraPermission || !hasMicPermission) {
     return (
