@@ -344,6 +344,7 @@ export default function CameraScreen() {
   }, [cameraState]);
 
   const controllerRebuildInFlightRef = useRef(false);
+  const pendingControllerGenerationRef = useRef<string | null>(null);
   const needsPreviewRenegotiationRef = useRef(false);
 
   const notifyCaptureState = useCallback((capturing: boolean) => {
@@ -755,67 +756,89 @@ export default function CameraScreen() {
 
       onAnswer(async (answer) => {
         await setRemoteDescription({ type: 'answer', sdp: answer.sdp });
-        setIsRemoteConnected(true);
-        setShowQR(false);
+        // An SDP answer alone is NOT a live camera-control connection.
+        // Wait for both ICE connectivity and an open DataChannel before
+        // displaying the green "Remote Connected" indicator.
+        console.log('[CAMERA] Remote SDP answer applied; waiting for DataChannel');
       });
 
       // A returning remembered controller always requests a fresh generation.
       // Rebuild only WebRTC; Vision Camera recording is deliberately outside
       // this lifecycle and must continue uninterrupted.
       onReconnectRequest(async (connectionId) => {
+        // Never DROP a reconnect request. The controller can time out while
+        // the camera is waiting for TURN/STUN or native video handoff. If we
+        // ignore the latest generation, its subsequent offer will never arrive.
+        pendingControllerGenerationRef.current = connectionId;
         if (controllerRebuildInFlightRef.current) {
-          console.warn('[CAMERA] Ignoring overlapping controller reconnect request');
+          console.log('[CAMERA] Queued newer controller generation:', connectionId);
           return;
         }
 
         controllerRebuildInFlightRef.current = true;
-        console.log(`[CAMERA] Rebuilding peer for controller generation ${connectionId}`);
-
         try {
-          const recording = cameraStateRef.current.isRecording;
+          while (pendingControllerGenerationRef.current) {
+            const generation = pendingControllerGenerationRef.current;
+            pendingControllerGenerationRef.current = null;
+            console.log('[CAMERA] Rebuilding peer for controller generation:', generation);
 
-          // Stop only WebRTC/SCTP. During an active video, its preview track is
-          // already detached, so this cannot stop the Vision Camera recording.
-          closeConnection();
-          setIsRemoteConnected(false);
-          setHasPaired(false);
+            try {
+              const recording = cameraStateRef.current.isRecording;
+              // Rebuild WebRTC ONLY: Vision Camera's active recording must not
+              // be stopped, remounted, or reacquired during remote recovery.
+              closeConnection();
+              setIsRemoteConnected(false);
+              setHasPaired(false);
 
-          if (recording) {
-            setIsWebRTCUsingCamera(false);
-            setCurrentStreamMode('frame-based');
-            needsPreviewRenegotiationRef.current = true;
+              if (recording) {
+                setIsWebRTCUsingCamera(false);
+                setCurrentStreamMode('frame-based');
+                needsPreviewRenegotiationRef.current = true;
+                await createConnection();
+              } else {
+                setIsWebRTCUsingCamera(true);
+                await new Promise(resolve => setTimeout(resolve, CAMERA_HANDOFF_MS));
+                await createConnection();
+                await startLocalStream();
 
-            await createConnection();
-          } else {
-            // Keep Vision Camera inactive while reacquiring the WebRTC preview
-            // so the handoff stays single-owner on iOS.
-            setIsWebRTCUsingCamera(true);
-            await new Promise(resolve => setTimeout(resolve, CAMERA_HANDOFF_MS));
+                const targetMode = determineStreamMode(
+                  cameraStateRef.current.facing,
+                  cameraStateRef.current.zoom,
+                  settings.previewMode
+                );
+                setCurrentStreamMode(targetMode);
 
-            await createConnection();
-            await startLocalStream();
+                if (targetMode === 'frame-based') {
+                  await detachLocalVideoTrackForRecording();
+                  setIsWebRTCUsingCamera(false);
+                  needsPreviewRenegotiationRef.current = true;
+                } else {
+                  needsPreviewRenegotiationRef.current = false;
+                }
+              }
 
-            const targetMode = determineStreamMode(
-              cameraStateRef.current.facing,
-              cameraStateRef.current.zoom,
-              settings.previewMode
-            );
-            setCurrentStreamMode(targetMode);
+              // A newer request arrived while camera setup was slow. Do not
+              // publish the previous generation's SDP; start over with the
+              // latest request instead.
+              if (pendingControllerGenerationRef.current) {
+                console.log('[CAMERA] Skipping superseded offer:', generation);
+                continue;
+              }
 
-            if (targetMode === 'frame-based') {
-              await detachLocalVideoTrackForRecording();
-              setIsWebRTCUsingCamera(false);
-              needsPreviewRenegotiationRef.current = true;
-            } else {
-              needsPreviewRenegotiationRef.current = false;
+              const freshOffer = await createOffer();
+              if (pendingControllerGenerationRef.current) {
+                console.log('[CAMERA] Skipping superseded offer after SDP:', generation);
+                continue;
+              }
+
+              await sendOffer({ type: 'offer', sdp: freshOffer.sdp! });
+              console.log('[CAMERA] Published fresh offer for controller generation:', generation);
+            } catch (error) {
+              console.error('[CAMERA] Failed to rebuild controller generation:', generation, error);
+              // If no newer request exists, the controller watchdog will retry
+              // with a fresh generation. Do not spin against native failures.
             }
           }
-
-          const freshOffer = await createOffer();
-          await sendOffer({ type: 'offer', sdp: freshOffer.sdp! });
-          console.log(`[CAMERA] Published fresh offer for controller generation ${connectionId}`);
-        } catch (error) {
-          console.error('[CAMERA] Failed to rebuild controller connection:', error);
         } finally {
           controllerRebuildInFlightRef.current = false;
         }
@@ -911,11 +934,13 @@ export default function CameraScreen() {
 
   // Update remote connection state
   useEffect(() => {
-    if (connectionState === 'connected') {
+    if (connectionState === 'connected' && isDataChannelReady) {
       setIsRemoteConnected(true);
       setHasPaired(true);
-    } else if (connectionState === 'failed' || connectionState === 'disconnected') {
+    } else {
       setIsRemoteConnected(false);
+    }
+    if (connectionState === 'failed' || connectionState === 'disconnected') {
       // Hand the camera back to vision-camera and fall back to frame-based:
       // it's the mode that doesn't need the lens, so the local preview works
       // again and the reconnect has one less thing to get right. Releasing
@@ -927,7 +952,7 @@ export default function CameraScreen() {
       setIsWebRTCUsingCamera(false);
       setCurrentStreamMode('frame-based');
     }
-  }, [connectionState, pauseLocalStream]);
+  }, [connectionState, isDataChannelReady, pauseLocalStream]);
 
   // Reconnecting after the app has been backgrounded
   //
@@ -996,6 +1021,7 @@ export default function CameraScreen() {
 
   useEffect(() => {
     if (!isStreamingToRemote) return;
+    if (controllerRebuildInFlightRef.current) return;
     if (!hasPaired) return;                 // setup owns the connection until it exists
     if (!isForeground) return;              // no camera to stream, nothing to renegotiate onto
     // Media being green is not enough. A restored controller can have ICE/media
@@ -1008,7 +1034,7 @@ export default function CameraScreen() {
     let timer: ReturnType<typeof setTimeout>;
 
     const attempt = async () => {
-      if (cancelled) return;
+      if (cancelled || controllerRebuildInFlightRef.current) return;
       // close() can land between a reconnect being scheduled and it firing -
       // the screen tearing down, or the user starting a new pairing.
       if (!webRTCService.hasPeerConnection()) {
@@ -1040,6 +1066,7 @@ export default function CameraScreen() {
         }
 
         const offer = await createOffer({ iceRestart: true });
+        if (cancelled || controllerRebuildInFlightRef.current) return;
         await sendOffer({ type: 'offer', sdp: offer.sdp! });
         console.log(`[CAMERA] Sent ICE-restart offer (attempt ${attempts})`);
       } catch (error) {
