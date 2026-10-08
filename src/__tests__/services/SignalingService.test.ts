@@ -5,6 +5,7 @@ import { generateSessionId } from '../../utils/sessionId';
 // Mock the sessionId generator
 jest.mock('../../utils/sessionId', () => ({
   generateSessionId: jest.fn(() => 'ABC123'),
+  generateConnectionId: jest.fn(() => 'YZX234ABC789'),
   isValidSessionId: jest.fn((value: string) => /^[A-HJ-NP-Z2-9]{6}$/.test(value)),
   isValidConnectionId: jest.fn((value: string) => /^[A-HJ-NP-Z2-9]{12}$/.test(value)),
 }));
@@ -207,6 +208,98 @@ describe('SignalingService', () => {
       expect(offerCallback).toHaveBeenCalledWith({
         type: 'offer',
         sdp: 'fresh-offer',
+      });
+    });
+  });
+
+  describe('connection-specific ICE and answer handling', () => {
+    it('writes new candidate IDs under the reconnect generation without changing Firestore fields', async () => {
+      mockGetDoc.mockResolvedValueOnce({
+        exists: () => true,
+        data: () => ({ status: 'waiting' }),
+      });
+      await signalingService.joinSession('XYZ789');
+      await signalingService.requestReconnect('XYZ789', 'ABC234XYZ789');
+
+      await signalingService.addIceCandidate('XYZ789', {
+        candidate: 'candidate:123',
+        sdpMLineIndex: 0,
+        sdpMid: 'video',
+      }, 'answer');
+
+      expect(mockAddDoc).not.toHaveBeenCalled();
+      expect(mockSetDoc).toHaveBeenLastCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          candidate: 'candidate:123',
+          sdpMid: 'video',
+          expireAt: expect.anything(),
+        })
+      );
+      expect(mockDoc).toHaveBeenCalledWith(
+        expect.anything(),
+        'ABC234XYZ789_YZX234ABC789'
+      );
+    });
+
+    it('drops candidates from previous controller generations', async () => {
+      mockGetDoc.mockResolvedValueOnce({
+        exists: () => true,
+        data: () => ({ status: 'waiting' }),
+      });
+      await signalingService.joinSession('XYZ789');
+      await signalingService.requestReconnect('XYZ789', 'ABC234XYZ789');
+
+      let handler: (snapshot: { docChanges: () => unknown[] }) => void;
+      mockOnSnapshot.mockImplementation((ref, cb) => {
+        handler = cb;
+        return jest.fn();
+      });
+
+      const candidateCallback = jest.fn();
+      signalingService.onIceCandidate('XYZ789', 'offer', candidateCallback);
+      handler!({
+        docChanges: () => [
+          { type: 'added', doc: { id: 'YZX234ABC789_OLD123', data: () => ({
+            candidate: 'candidate:old', sdpMLineIndex: 0, sdpMid: 'video',
+          }) } },
+          { type: 'added', doc: { id: 'ABC234XYZ789_YZX234ABC789', data: () => ({
+            candidate: 'candidate:new', sdpMLineIndex: 0, sdpMid: 'video',
+          }) } },
+        ],
+      });
+
+      expect(candidateCallback).toHaveBeenCalledTimes(1);
+      expect(candidateCallback).toHaveBeenCalledWith(expect.objectContaining({
+        candidate: 'candidate:new',
+      }));
+    });
+
+    it('ignores answers from a superseded controller generation', async () => {
+      let handler: (snapshot: { data: () => unknown }) => void;
+      mockOnSnapshot.mockImplementation((ref, cb) => {
+        handler = cb;
+        return jest.fn();
+      });
+
+      const callback = jest.fn();
+      signalingService.onReconnectRequest('XYZ789', jest.fn());
+      signalingService.onAnswer('XYZ789', callback);
+      // Signal the camera about a fresh controller generation.
+      const callbacks = mockOnSnapshot.mock.calls.map(call => call[1]);
+      callbacks[0]({ data: () => ({ connectionId: 'ABC234XYZ789' }) });
+      handler!({ data: () => ({
+        connectionId: 'YZX234ABC789',
+        answer: { type: 'answer', sdp: 'stale' },
+      })});
+      handler!({ data: () => ({
+        connectionId: 'ABC234XYZ789',
+        answer: { type: 'answer', sdp: 'fresh' },
+      })});
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(callback).toHaveBeenCalledWith({
+        type: 'answer',
+        sdp: 'fresh',
       });
     });
   });
