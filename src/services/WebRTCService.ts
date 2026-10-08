@@ -78,12 +78,21 @@ class WebRTCService {
     this.pendingIceCandidates = [];
     this.videoSender = null;
     this.generation++;
+    const thisGeneration = this.generation;
 
     const rtcConfig = await getRtcConfig();
-    this.peerConnection = new RTCPeerConnection(rtcConfig as any);
+    // An older connection setup can finish after close()/reconnect() while
+    // TURN credentials are being fetched. Never let that stale async setup
+    // replace the controller's newer WebRTC peer.
+    if (thisGeneration !== this.generation) {
+      throw new Error('WebRTC peer setup was superseded by a newer connection');
+    }
+    const pc = new RTCPeerConnection(rtcConfig as any);
+    this.peerConnection = pc;
 
     // Handle ICE candidates
-    (this.peerConnection as any).onicecandidate = (event: RTCPeerConnectionIceEvent) => {
+    (pc as any).onicecandidate = (event: RTCPeerConnectionIceEvent) => {
+      if (pc !== this.peerConnection || thisGeneration !== this.generation) return;
       if (event.candidate && this.onIceCandidateCallback) {
         this.onIceCandidateCallback({
           candidate: event.candidate.candidate as string,
@@ -94,25 +103,23 @@ class WebRTCService {
     };
 
     // Handle connection state changes
-    (this.peerConnection as any).onconnectionstatechange = () => {
-      if (this.onConnectionStateCallback && this.peerConnection) {
-        const state = this.mapConnectionState(
-          (this.peerConnection as any).connectionState
-        );
+    (pc as any).onconnectionstatechange = () => {
+      if (pc !== this.peerConnection || thisGeneration !== this.generation) return;
+      if (this.onConnectionStateCallback) {
+        const state = this.mapConnectionState((pc as any).connectionState);
         this.onConnectionStateCallback(state);
       }
     };
 
     // Handle ICE connection state changes
-    (this.peerConnection as any).oniceconnectionstatechange = () => {
-      console.log(
-        'ICE connection state:',
-        this.peerConnection?.iceConnectionState
-      );
+    (pc as any).oniceconnectionstatechange = () => {
+      if (pc !== this.peerConnection || thisGeneration !== this.generation) return;
+      console.log('ICE connection state:', pc.iceConnectionState);
     };
 
     // Handle incoming tracks (remote stream)
-    (this.peerConnection as any).ontrack = (event: RTCTrackEvent) => {
+    (pc as any).ontrack = (event: RTCTrackEvent) => {
+      if (pc !== this.peerConnection || thisGeneration !== this.generation) return;
       console.log(`[WebRTC] ontrack event: track kind=${event.track?.kind}, id=${event.track?.id}, readyState=${event.track?.readyState}`);
       console.log(`[WebRTC] ontrack event: streams count=${event.streams?.length}`);
       if (event.streams && event.streams[0]) {
@@ -128,7 +135,8 @@ class WebRTCService {
     };
 
     // Handle incoming data channel
-    (this.peerConnection as any).ondatachannel = (event: RTCDataChannelEvent) => {
+    (pc as any).ondatachannel = (event: RTCDataChannelEvent) => {
+      if (pc !== this.peerConnection || thisGeneration !== this.generation) return;
       this.setupDataChannel(event.channel);
     };
 
