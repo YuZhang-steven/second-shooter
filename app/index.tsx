@@ -174,6 +174,7 @@ export default function CameraScreen() {
     createSession,
     sendOffer,
     onAnswer,
+    onReconnectRequest,
     addIceCandidate: addSignalingIceCandidate,
     onIceCandidate: listenForIceCandidate,
     cleanup: cleanupSignaling,
@@ -325,6 +326,16 @@ export default function CameraScreen() {
     isDataChannelReadyRef.current = isDataChannelReady;
   }, [isDataChannelReady]);
 
+  // Reconnect callbacks are registered once with Firestore, so read mutable
+  // camera state through a ref instead of capturing an old render.
+  const cameraStateRef = useRef(cameraState);
+  useEffect(() => {
+    cameraStateRef.current = cameraState;
+  }, [cameraState]);
+
+  const controllerRebuildInFlightRef = useRef(false);
+  const needsPreviewRenegotiationRef = useRef(false);
+
   const notifyCaptureState = useCallback((capturing: boolean) => {
     if (!isDataChannelReadyRef.current) return;
     sendResponse({ type: 'CAPTURE_STATE', capturing });
@@ -431,12 +442,30 @@ export default function CameraScreen() {
       setIsWebRTCUsingCamera(true);
       await new Promise(resolve => setTimeout(resolve, CAMERA_HANDOFF_MS));
       await resumeLocalStream(facingRef.current);
+
+      // If a remembered controller returned while recording, its fresh peer
+      // was intentionally negotiated without a camera track. After explicit
+      // Stop, publish a second offer so the newly added preview track becomes
+      // part of that same controller generation.
+      if (needsPreviewRenegotiationRef.current) {
+        const previewOffer = await createOffer();
+        await sendOffer({ type: 'offer', sdp: previewOffer.sdp! });
+        needsPreviewRenegotiationRef.current = false;
+        console.log('[CAMERA] Renegotiated preview after recording stopped');
+      }
     } finally {
       // Always clears, same as the photo path - otherwise the remote would
       // sit behind a "camera busy" overlay forever.
       notifyCaptureState(false);
     }
-  }, [connectionState, isDataChannelReady, notifyCaptureState, resumeLocalStream]);
+  }, [
+    connectionState,
+    isDataChannelReady,
+    notifyCaptureState,
+    resumeLocalStream,
+    createOffer,
+    sendOffer,
+  ]);
 
   // Wrap useCamera.startRecording so every shutter path - remote command,
   // volume button, on-screen - goes through the same lock acquisition.
@@ -683,6 +712,68 @@ export default function CameraScreen() {
         setShowQR(false);
       });
 
+      // A returning remembered controller always requests a fresh generation.
+      // Rebuild only WebRTC; Vision Camera recording is deliberately outside
+      // this lifecycle and must continue uninterrupted.
+      onReconnectRequest(async (connectionId) => {
+        if (controllerRebuildInFlightRef.current) {
+          console.warn('[CAMERA] Ignoring overlapping controller reconnect request');
+          return;
+        }
+
+        controllerRebuildInFlightRef.current = true;
+        console.log(`[CAMERA] Rebuilding peer for controller generation ${connectionId}`);
+
+        try {
+          const recording = cameraStateRef.current.isRecording;
+
+          // Stop only WebRTC/SCTP. During an active video, its preview track is
+          // already detached, so this cannot stop the Vision Camera recording.
+          closeConnection();
+          setIsRemoteConnected(false);
+          setHasPaired(false);
+
+          if (recording) {
+            setIsWebRTCUsingCamera(false);
+            setCurrentStreamMode('frame-based');
+            needsPreviewRenegotiationRef.current = true;
+
+            await createConnection();
+          } else {
+            // Keep Vision Camera inactive while reacquiring the WebRTC preview
+            // so the handoff stays single-owner on iOS.
+            setIsWebRTCUsingCamera(true);
+            await new Promise(resolve => setTimeout(resolve, CAMERA_HANDOFF_MS));
+
+            await createConnection();
+            await startLocalStream();
+
+            const targetMode = determineStreamMode(
+              cameraStateRef.current.facing,
+              cameraStateRef.current.zoom,
+              settings.previewMode
+            );
+            setCurrentStreamMode(targetMode);
+
+            if (targetMode === 'frame-based') {
+              await detachLocalVideoTrackForRecording();
+              setIsWebRTCUsingCamera(false);
+              needsPreviewRenegotiationRef.current = true;
+            } else {
+              needsPreviewRenegotiationRef.current = false;
+            }
+          }
+
+          const freshOffer = await createOffer();
+          await sendOffer({ type: 'offer', sdp: freshOffer.sdp! });
+          console.log(`[CAMERA] Published fresh offer for controller generation ${connectionId}`);
+        } catch (error) {
+          console.error('[CAMERA] Failed to rebuild controller connection:', error);
+        } finally {
+          controllerRebuildInFlightRef.current = false;
+        }
+      });
+
       setShowQR(showQrForSession);
     } catch (error) {
       console.error('[CAMERA] Connection setup error:', error);
@@ -707,11 +798,13 @@ export default function CameraScreen() {
     detachLocalVideoTrackForRecording,
     listenForIceCandidate,
     onAnswer,
+    onReconnectRequest,
     pauseLocalStream,
     sendOffer,
     setRemoteDescription,
     settings.previewMode,
     startLocalStream,
+    closeConnection,
   ]);
 
   // Once this phone has been used as the camera, silently restore that Pair ID
