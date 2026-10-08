@@ -5,6 +5,7 @@ import {
   TouchableOpacity,
   Text,
   Alert,
+  AppState,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useIsFocused } from '@react-navigation/native';
@@ -432,7 +433,12 @@ export default function CameraScreen() {
       // A recording may be stopped locally while the remote is still offline.
       // Do not hand the lens back to WebRTC unless there is an actual controller
       // to receive that preview; keep the camera usable locally instead.
-      if (connectionState !== 'connected' || !isDataChannelReady) {
+      if (
+        AppState.currentState !== 'active' ||
+        !isFocusedRef.current ||
+        connectionState !== 'connected' ||
+        !isDataChannelReady
+      ) {
         setIsWebRTCUsingCamera(false);
         setCurrentStreamMode('frame-based');
         return;
@@ -527,6 +533,26 @@ export default function CameraScreen() {
   handleStartRecordingRef.current = handleStartRecording;
   handleStopRecordingRef.current = handleStopRecording;
 
+  // The recording belongs to this phone, not the remote connection. When the
+  // CAMERA app itself is sent inactive/background, request native Stop before
+  // iOS tears down the AVFoundation session. The VisionCamera finished callback
+  // then imports the staged Documents file into Photos. It can still be
+  // recovered on the next launch if the import gets interrupted.
+  //
+  // 'inactive' happens before 'background' on iOS; waiting until background
+  // alone may be too late. The hook deduplicates the two events and any
+  // simultaneous remote/volume-button Stop.
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (next) => {
+      if (next !== 'inactive' && next !== 'background') return;
+
+      void handleStopRecordingRef.current?.().catch((error) => {
+        console.error('[CAMERA] Could not auto-save recording on app exit:', error);
+      });
+    });
+    return () => subscription.remove();
+  }, []);
+
   // Get camera devices with multi-camera support for optical zoom
   // Request all physical devices to enable lens switching
   const device = useCameraDevice(cameraState.facing, {
@@ -620,6 +646,18 @@ export default function CameraScreen() {
     };
     requestPermissions();
   }, [hasCameraPermission, hasMicPermission, requestCameraPermission, requestMicPermission]);
+
+  // Re-import a native video which finished on a previous launch but whose
+  // Photos save was interrupted when iOS suspended/terminated the app.
+  useEffect(() => {
+    void mediaService.recoverPendingVideos().then((count) => {
+      if (count > 0) {
+        console.log(`[CAMERA] Recovered ${count} interrupted recording(s)`);
+      }
+    }).catch((error) => {
+      console.error('[CAMERA] Pending recording recovery failed:', error);
+    });
+  }, []);
 
   // Detect available lenses - always use backDevice for consistent lens list
   useEffect(() => {
@@ -1150,17 +1188,39 @@ export default function CameraScreen() {
 
   // Navigate to remote screen
   const handleGoToRemote = async () => {
+    // Never unmount the native recording camera before finalizing its video.
+    try {
+      await handleStopRecording();
+    } catch (error) {
+      console.error('[CAMERA] Cannot navigate before video is safely finalized:', error);
+      Alert.alert('Recording', 'Could not finish saving the video. Please try stopping again.');
+      return;
+    }
     await pairingService.setPreferredMode('remote');
     router.push('/remote');
   };
 
   // Handle opening gallery
   const handleOpenGallery = async () => {
+    try {
+      await handleStopRecording();
+    } catch (error) {
+      console.error('[CAMERA] Video was not saved before opening gallery:', error);
+      Alert.alert('Recording', 'Could not finish saving the video. Please try stopping again.');
+      return;
+    }
     await mediaService.openGallery();
   };
 
   // Handle settings press
-  const handleSettingsPress = () => {
+  const handleSettingsPress = async () => {
+    try {
+      await handleStopRecording();
+    } catch (error) {
+      console.error('[CAMERA] Video was not saved before opening settings:', error);
+      Alert.alert('Recording', 'Could not finish saving the video. Please try stopping again.');
+      return;
+    }
     router.push('/settings');
   };
 
