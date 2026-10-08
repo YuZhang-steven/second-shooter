@@ -533,18 +533,18 @@ export default function CameraScreen() {
   handleStartRecordingRef.current = handleStartRecording;
   handleStopRecordingRef.current = handleStopRecording;
 
-  // The recording belongs to this phone, not the remote connection. When the
-  // CAMERA app itself is sent inactive/background, request native Stop before
-  // iOS tears down the AVFoundation session. The VisionCamera finished callback
-  // then imports the staged Documents file into Photos. It can still be
-  // recovered on the next launch if the import gets interrupted.
+  // The recording belongs to this phone, not the remote connection. If the
+  // CAMERA app itself goes into the background, ask Vision Camera to finalize
+  // immediately, before iOS suspends the JS runtime. Native output is staged
+  // in Documents so a finalized file can also be recovered next launch.
   //
-  // 'inactive' happens before 'background' on iOS; waiting until background
-  // alone may be too late. The hook deduplicates the two events and any
-  // simultaneous remote/volume-button Stop.
+  // Do NOT stop merely on iOS 'inactive': opening Control Center to change
+  // Wi-Fi/airplane mode also marks the app inactive temporarily, and a network
+  // change must not decide when the video stops. Actual screen navigation is
+  // handled explicitly below, before unmounting the Camera.
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (next) => {
-      if (next !== 'inactive' && next !== 'background') return;
+      if (next !== 'background') return;
 
       void handleStopRecordingRef.current?.().catch((error) => {
         console.error('[CAMERA] Could not auto-save recording on app exit:', error);
