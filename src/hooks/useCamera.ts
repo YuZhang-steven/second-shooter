@@ -1,4 +1,5 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef } from 'react';
+import { AppState } from 'react-native';
 import { Camera, PhotoFile, VideoFile } from 'react-native-vision-camera';
 import { CameraState, FlashMode, CaptureMode, CameraFacing } from '../types';
 import { mediaService, SavedMedia } from '../services/MediaService';
@@ -133,60 +134,130 @@ export function useCamera(initialState?: Partial<CameraState>) {
     }
   }, []);
 
+  // A synchronous ref is critical for AppState callbacks: they can fire before
+  // React has rendered the isRecording state after START_RECORDING, or while
+  // a Stop is already in progress.
+  const isRecordingRef = useRef(false);
+  const stopInFlightRef = useRef<Promise<void> | null>(null);
+  const recordingFinishedRef = useRef<{
+    promise: Promise<void>;
+    resolve: () => void;
+    reject: (error: unknown) => void;
+  } | null>(null);
+
   // Start video recording
   const startRecording = useCallback(async (
     onFinished?: (video: VideoFile) => void,
     onError?: (error: unknown) => void
   ): Promise<void> => {
     if (!cameraRef.current) {
-      console.error('Camera ref not set');
+      throw new Error('Camera ref not set');
+    }
+
+    if (isRecordingRef.current || stopInFlightRef.current) {
+      console.warn('Already recording/stopping');
       return;
     }
 
-    if (state.isRecording) {
-      console.warn('Already recording');
-      return;
+    // Preparing the folder can cross a foreground/background transition. Never
+    // start a fresh native camera recording after iOS has begun suspending us.
+    const directory = await mediaService.prepareVideoRecordingDirectory();
+    if (AppState.currentState !== 'active' || !cameraRef.current) {
+      throw new Error('Camera app is no longer active');
     }
 
+    let resolveFinished!: () => void;
+    let rejectFinished!: (error: unknown) => void;
+    const finished = new Promise<void>((resolve, reject) => {
+      resolveFinished = resolve;
+      rejectFinished = reject;
+    });
+    // A native error may precede a Stop caller awaiting this Promise.
+    void finished.catch(() => {});
+    const completion = {
+      promise: finished,
+      resolve: resolveFinished,
+      reject: rejectFinished,
+    };
+    recordingFinishedRef.current = completion;
+    isRecordingRef.current = true;
     updateState({ isRecording: true });
 
-    cameraRef.current.startRecording({
-      flash: state.flash === 'auto' ? 'on' : state.flash,
-      onRecordingFinished: async (video) => {
-        updateState({ isRecording: false });
-
-        // Save to the configured location
-        await mediaService.saveVideo(video);
-
-        onFinished?.(video);
-      },
-      onRecordingError: (error) => {
-        updateState({ isRecording: false });
-        console.error('Recording error:', error);
-        onError?.(error);
-      },
-    });
-  }, [state.flash, state.isRecording, updateState]);
-
-  // Stop video recording
-  const stopRecording = useCallback(async (): Promise<void> => {
-    if (!cameraRef.current) {
-      console.error('Camera ref not set');
-      return;
-    }
-
-    if (!state.isRecording) {
-      console.warn('Not recording');
-      return;
-    }
-
     try {
-      await cameraRef.current.stopRecording();
+      await cameraRef.current.startRecording({
+        path: directory,
+        flash: state.flash === 'auto' ? 'on' : state.flash,
+        onRecordingFinished: async (video) => {
+          isRecordingRef.current = false;
+          updateState({ isRecording: false });
+
+          try {
+            const saved = await mediaService.saveCompletedVideo(video);
+            if (!saved) {
+              throw new Error('Video could not be imported; recoverable copy was kept');
+            }
+            onFinished?.(video);
+            completion.resolve();
+          } catch (error) {
+            console.error('[CAMERA] Video import failed; keeping recovery copy:', error);
+            completion.reject(error);
+            onError?.(error);
+          } finally {
+            if (recordingFinishedRef.current === completion) {
+              recordingFinishedRef.current = null;
+            }
+          }
+        },
+        onRecordingError: (error) => {
+          isRecordingRef.current = false;
+          updateState({ isRecording: false });
+          console.error('Recording error:', error);
+          completion.reject(error);
+          if (recordingFinishedRef.current === completion) {
+            recordingFinishedRef.current = null;
+          }
+          onError?.(error);
+        },
+      });
     } catch (error) {
-      console.error('Error stopping recording:', error);
+      isRecordingRef.current = false;
+      updateState({ isRecording: false });
+      completion.reject(error);
+      if (recordingFinishedRef.current === completion) {
+        recordingFinishedRef.current = null;
+      }
       throw error;
     }
-  }, [state.isRecording]);
+  }, [state.flash, updateState]);
+
+  // Stop video recording. Deduplicate commands from the controller, shutter,
+  // foreground transitions, and navigation so the native recorder sees one
+  // Stop. Wait for onRecordingFinished AND the media import, not just the
+  // initial stopRecording native request.
+  const stopRecording = useCallback(async (): Promise<void> => {
+    if (stopInFlightRef.current) return stopInFlightRef.current;
+
+    if (!isRecordingRef.current) {
+      return recordingFinishedRef.current?.promise;
+    }
+
+    const camera = cameraRef.current;
+    if (!camera) {
+      throw new Error('Recording camera is no longer mounted');
+    }
+
+    const completed = recordingFinishedRef.current?.promise;
+    const stopTask = (async () => {
+      await camera.stopRecording();
+      if (completed) await completed;
+    })();
+    stopInFlightRef.current = stopTask;
+    try {
+      await stopTask;
+    } finally {
+      stopInFlightRef.current = null;
+    }
+  }, []);
 
   // Reset state to defaults
   const reset = useCallback(() => {
