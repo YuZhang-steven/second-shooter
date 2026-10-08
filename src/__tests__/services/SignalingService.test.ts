@@ -6,6 +6,7 @@ import { generateSessionId } from '../../utils/sessionId';
 jest.mock('../../utils/sessionId', () => ({
   generateSessionId: jest.fn(() => 'ABC123'),
   isValidSessionId: jest.fn((value: string) => /^[A-HJ-NP-Z2-9]{6}$/.test(value)),
+  isValidConnectionId: jest.fn((value: string) => /^[A-HJ-NP-Z2-9]{12}$/.test(value)),
 }));
 
 // Get mock functions
@@ -122,6 +123,91 @@ describe('SignalingService', () => {
       await signalingService.joinSession('NONEXISTENT');
 
       expect(signalingService.getSessionId()).toBeNull();
+    });
+  });
+
+  describe('remembered-controller reconnect handshake', () => {
+    it('clears stale SDP and writes a fresh connection generation', async () => {
+      mockGetDoc.mockResolvedValueOnce({
+        exists: () => true,
+        data: () => ({ status: 'connected' }),
+      });
+      await signalingService.joinSession('XYZ789');
+
+      await signalingService.requestReconnect('XYZ789', 'ABC234XYZ789');
+
+      expect(mockSetDoc).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          connectionId: 'ABC234XYZ789',
+          status: 'waiting',
+          offer: expect.anything(),
+          answer: expect.anything(),
+        }),
+        { merge: true }
+      );
+    });
+
+    it('delivers only a fresh reconnect generation once to the camera', async () => {
+      let snapshotCallback: (snapshot: { data: () => any }) => void;
+      mockOnSnapshot.mockImplementation((ref, callback) => {
+        snapshotCallback = callback;
+        return jest.fn();
+      });
+
+      const callback = jest.fn();
+      signalingService.onReconnectRequest('ABC123', callback);
+
+      snapshotCallback!({
+        data: () => ({
+          connectionId: 'ABC234XYZ789',
+        }),
+      });
+      snapshotCallback!({
+        data: () => ({
+          connectionId: 'ABC234XYZ789',
+        }),
+      });
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(callback).toHaveBeenCalledWith('ABC234XYZ789');
+    });
+
+    it('ignores stale offers from a different controller generation', async () => {
+      mockGetDoc.mockResolvedValueOnce({
+        exists: () => true,
+        data: () => ({ status: 'waiting' }),
+      });
+      await signalingService.joinSession('XYZ789');
+      await signalingService.requestReconnect('XYZ789', 'ABC234XYZ789');
+
+      let snapshotCallback: (snapshot: { data: () => any }) => void;
+      mockOnSnapshot.mockImplementation((ref, callback) => {
+        snapshotCallback = callback;
+        return jest.fn();
+      });
+
+      const offerCallback = jest.fn();
+      signalingService.onOffer('XYZ789', offerCallback);
+
+      snapshotCallback!({
+        data: () => ({
+          connectionId: 'ZZZ234YYY789',
+          offer: { type: 'offer', sdp: 'stale-offer' },
+        }),
+      });
+      snapshotCallback!({
+        data: () => ({
+          connectionId: 'ABC234XYZ789',
+          offer: { type: 'offer', sdp: 'fresh-offer' },
+        }),
+      });
+
+      expect(offerCallback).toHaveBeenCalledTimes(1);
+      expect(offerCallback).toHaveBeenCalledWith({
+        type: 'offer',
+        sdp: 'fresh-offer',
+      });
     });
   });
 
