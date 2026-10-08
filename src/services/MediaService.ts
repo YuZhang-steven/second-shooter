@@ -119,9 +119,12 @@ class MediaService {
     if (!PENDING_VIDEO_DIR) {
       throw new Error('Persistent video storage is unavailable');
     }
-    await FileSystem.makeDirectoryAsync(PENDING_VIDEO_DIR, {
-      intermediates: true,
-    });
+    const info = await FileSystem.getInfoAsync(PENDING_VIDEO_DIR);
+    if (!info.exists) {
+      await FileSystem.makeDirectoryAsync(PENDING_VIDEO_DIR, {
+        intermediates: true,
+      });
+    }
     return PENDING_VIDEO_DIR;
   }
 
