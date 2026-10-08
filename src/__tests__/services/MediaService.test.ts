@@ -151,3 +151,75 @@ describe('getLastPhotoUri', () => {
     );
   });
 });
+
+
+describe('interrupted video recording recovery', () => {
+  const recoveryDir = `${FileSystem.documentDirectory}SecondShooterRecordings/`;
+  const stagedFile = `${recoveryDir}clip.mov`;
+
+  beforeEach(() => {
+    (FileSystem.makeDirectoryAsync as jest.Mock).mockResolvedValue(undefined);
+    (FileSystem.deleteAsync as jest.Mock).mockResolvedValue(undefined);
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValue(['clip.mov']);
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === recoveryDir) return { exists: true, isDirectory: true };
+      if (uri === stagedFile) {
+        return { exists: true, isDirectory: false, size: 1024 };
+      }
+      return { exists: false };
+    });
+  });
+
+  it('records to a recoverable Documents directory', async () => {
+    const path = await mediaService.prepareVideoRecordingDirectory();
+    expect(path).toBe(recoveryDir);
+    expect(FileSystem.makeDirectoryAsync).toHaveBeenCalledWith(recoveryDir, {
+      intermediates: true,
+    });
+  });
+
+  it('deletes staging only after successful Photos import', async () => {
+    const saved = await mediaService.saveCompletedVideo({ path: stagedFile } as any);
+
+    expect(saved?.uri).toBeTruthy();
+    expect(MediaLibrary.createAssetAsync).toHaveBeenCalledWith(stagedFile);
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith(stagedFile, {
+      idempotent: true,
+    });
+  });
+
+  it('keeps the staged recording if Photos import fails', async () => {
+    (MediaLibrary.createAssetAsync as jest.Mock).mockRejectedValueOnce(
+      new Error('Photos temporarily unavailable')
+    );
+
+    await expect(
+      mediaService.saveCompletedVideo({ path: stagedFile } as any)
+    ).rejects.toThrow('Photos temporarily unavailable');
+
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+  });
+
+  it('recovers previously finalized clips on a later launch', async () => {
+    const recovered = await mediaService.recoverPendingVideos();
+
+    expect(recovered).toBe(1);
+    expect(MediaLibrary.createAssetAsync).toHaveBeenCalledWith(stagedFile);
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith(stagedFile, {
+      idempotent: true,
+    });
+  });
+
+  it('does not try to import empty or unfinished staged files', async () => {
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === recoveryDir) return { exists: true, isDirectory: true };
+      return { exists: true, isDirectory: false, size: 0 };
+    });
+
+    const recovered = await mediaService.recoverPendingVideos();
+
+    expect(recovered).toBe(0);
+    expect(MediaLibrary.createAssetAsync).not.toHaveBeenCalled();
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+  });
+});
