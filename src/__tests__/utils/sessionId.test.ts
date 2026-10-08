@@ -1,4 +1,9 @@
-import { generateSessionId, isValidSessionId } from '../../utils/sessionId';
+import {
+  generateSessionId,
+  generateConnectionId,
+  isValidSessionId,
+  isValidConnectionId,
+} from '../../utils/sessionId';
 
 describe('sessionId utilities', () => {
   describe('generateSessionId', () => {
@@ -42,6 +47,19 @@ describe('sessionId utilities', () => {
 
       // With 31^6 possible combinations, collisions in 100 tries are extremely unlikely
       expect(ids.size).toBe(100);
+    });
+  });
+
+  describe('connection generation IDs', () => {
+    it('generates valid 12-character IDs', () => {
+      const connectionId = generateConnectionId();
+      expect(connectionId).toHaveLength(12);
+      expect(isValidConnectionId(connectionId)).toBe(true);
+    });
+
+    it('rejects wrong-length or excluded-character connection IDs', () => {
+      expect(isValidConnectionId('ABC234')).toBe(false);
+      expect(isValidConnectionId('ABC234XYZ78I')).toBe(false);
     });
   });
 
