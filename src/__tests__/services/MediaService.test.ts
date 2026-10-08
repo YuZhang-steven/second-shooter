@@ -171,11 +171,18 @@ describe('interrupted video recording recovery', () => {
   });
 
   it('records to a recoverable Documents directory', async () => {
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: false });
     const path = await mediaService.prepareVideoRecordingDirectory();
     expect(path).toBe(recoveryDir);
     expect(FileSystem.makeDirectoryAsync).toHaveBeenCalledWith(recoveryDir, {
       intermediates: true,
     });
+  });
+
+  it('reuses an existing recording directory without recreating it', async () => {
+    const path = await mediaService.prepareVideoRecordingDirectory();
+    expect(path).toBe(recoveryDir);
+    expect(FileSystem.makeDirectoryAsync).not.toHaveBeenCalled();
   });
 
   it('deletes staging only after successful Photos import', async () => {
