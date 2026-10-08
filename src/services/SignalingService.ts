@@ -90,7 +90,6 @@ class SignalingService {
     this.processedAnswerSdp = null;
     this.processedReconnectConnectionId = null;
     this.expectedConnectionId = null;
-    this.expectedConnectionId = null;
 
     const normalizedPreferred = preferredSessionId?.trim().toUpperCase();
     const sessionId =
@@ -387,6 +386,8 @@ class SignalingService {
     // Reset processed flags for next session
     this.processedOfferSdp = null;
     this.processedAnswerSdp = null;
+    this.processedReconnectConnectionId = null;
+    this.expectedConnectionId = null;
   }
 
   // Get current session ID
