@@ -293,6 +293,7 @@ export default function CameraScreen() {
         break;
 
       case 'GET_STATE':
+        console.log(`[CAMERA] GET_STATE received: mode=${cameraState.captureMode}, recording=${cameraState.isRecording}`);
         // Send state with current stream mode (uses ref to avoid stale closure)
         sendStateUpdate(
           cameraState,
