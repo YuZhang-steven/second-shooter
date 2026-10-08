@@ -15,6 +15,22 @@ export function generateSessionId(length: number = 6): string {
   return result;
 }
 
+export function generateConnectionId(): string {
+  return generateSessionId(12);
+}
+
+export function isValidConnectionId(connectionId: string): boolean {
+  if (!connectionId || connectionId.length !== 12) {
+    return false;
+  }
+  for (const char of connectionId) {
+    if (!CHARACTERS.includes(char)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // Validate session ID format
 export function isValidSessionId(sessionId: string): boolean {
   if (!sessionId || sessionId.length !== 6) {
