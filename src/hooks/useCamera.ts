@@ -185,7 +185,9 @@ export function useCamera(initialState?: Partial<CameraState>) {
 
     try {
       await cameraRef.current.startRecording({
-        path: directory,
+        // Expo's documentDirectory is a file:// URI, but Vision Camera's
+        // native recorder expects an absolute filesystem directory path.
+        path: directory.startsWith('file://') ? directory.slice(7) : directory,
         flash: state.flash === 'auto' ? 'on' : state.flash,
         onRecordingFinished: async (video) => {
           isRecordingRef.current = false;
