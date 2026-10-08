@@ -153,7 +153,7 @@ export default function RemoteScreen() {
 
     switch (response.type) {
       case 'STATE_UPDATE':
-        console.log(`[REMOTE] STATE_UPDATE: zoom=${response.state.zoom}, facing=${response.state.facing}, streamMode=${response.streamMode}`);
+        console.log(`[REMOTE] STATE_UPDATE: mode=${response.state.captureMode}, recording=${response.state.isRecording}, zoom=${response.state.zoom}, facing=${response.state.facing}, streamMode=${response.streamMode}`);
         if (connectWatchdogRef.current) {
           clearTimeout(connectWatchdogRef.current);
           connectWatchdogRef.current = null;
