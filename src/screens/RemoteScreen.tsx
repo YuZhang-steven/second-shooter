@@ -4,6 +4,7 @@ import {
   StyleSheet,
   Text,
   Alert,
+  TouchableOpacity,
 } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { MediaStream } from 'react-native-webrtc';
@@ -29,6 +30,20 @@ import {
 } from '../types';
 import { parseSessionIdFromInput } from '../../shared/session-link';
 import { generateConnectionId } from '../utils/sessionId';
+
+const RECONNECT_ATTEMPT_TIMEOUT_MS = 15000;
+const RECONNECT_RETRY_DELAY_MS = 5000;
+
+// A Firestore setDoc can wait for connectivity for a long time. A remembered
+// pairing must show a meaningful status and retry rather than hanging forever.
+async function withReconnectTimeout<T>(task: Promise<T>, label: string): Promise<T> {
+  return Promise.race([
+    task,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after 15 seconds`)), RECONNECT_ATTEMPT_TIMEOUT_MS)
+    ),
+  ]);
+}
 
 const DEFAULT_STATE: CameraState = {
   zoom: 1,
@@ -70,6 +85,7 @@ export default function RemoteScreen() {
   const [pairingLoaded, setPairingLoaded] = useState(Boolean(initialSessionId));
   const [rememberedPairId, setRememberedPairId] = useState<string | null>(null);
   const [isRestoringPairing, setIsRestoringPairing] = useState(false);
+  const [reconnectError, setReconnectError] = useState<string | null>(null);
   const [reconnectTick, setReconnectTick] = useState(0);
   const [remoteState, setRemoteState] = useState<CameraState>(DEFAULT_STATE);
   const [remoteLenses, setRemoteLenses] = useState<LensInfo[]>([]);
@@ -100,6 +116,8 @@ export default function RemoteScreen() {
   const connectingSessionRef = useRef<string | null>(null);
   const rememberedRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const stateSyncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const connectWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const connectAttemptNumberRef = useRef(0);
   const handleFrameData = useCallback((frameData: FrameDataMessage) => {
     framesReceivedRef.current++;
     // Log every 30 frames (~3 seconds)
@@ -128,6 +146,11 @@ export default function RemoteScreen() {
     switch (response.type) {
       case 'STATE_UPDATE':
         console.log(`[REMOTE] STATE_UPDATE: zoom=${response.state.zoom}, facing=${response.state.facing}, streamMode=${response.streamMode}`);
+        if (connectWatchdogRef.current) {
+          clearTimeout(connectWatchdogRef.current);
+          connectWatchdogRef.current = null;
+        }
+        setReconnectError(null);
         if (stateSyncTimeoutRef.current) {
           clearTimeout(stateSyncTimeoutRef.current);
           stateSyncTimeoutRef.current = null;
@@ -193,7 +216,8 @@ export default function RemoteScreen() {
   const handleDataChannelOpen = useCallback(() => {
     console.log('Data channel is now ready');
     setIsDataChannelReady(true);
-    setIsRestoringPairing(false);
+    // DataChannel open is not proof that camera commands are being received.
+    // Keep reconnect status until a real STATE_UPDATE arrives.
     webRTCService.onFrameData(handleFrameData);
   }, [handleFrameData]);
 
@@ -212,7 +236,7 @@ export default function RemoteScreen() {
     if (nativeReady && !isDataChannelReady) {
       console.log('[REMOTE] Restoring DataChannel readiness from native state');
       setIsDataChannelReady(true);
-      setIsRestoringPairing(false);
+      // Wait for a real STATE_UPDATE before declaring reconnect complete.
       webRTCService.onFrameData(handleFrameData);
     }
   }, [isForeground, isDataChannelReady, handleFrameData]);
@@ -240,6 +264,14 @@ export default function RemoteScreen() {
   });
 
   const clearActiveConnection = useCallback(() => {
+    if (connectWatchdogRef.current) {
+      clearTimeout(connectWatchdogRef.current);
+      connectWatchdogRef.current = null;
+    }
+    if (stateSyncTimeoutRef.current) {
+      clearTimeout(stateSyncTimeoutRef.current);
+      stateSyncTimeoutRef.current = null;
+    }
     cleanupSignaling();
     closeConnection();
     connectingSessionRef.current = null;
@@ -255,11 +287,29 @@ export default function RemoteScreen() {
     }
 
     console.log('[REMOTE] Restarting stale remembered controller connection');
+    connectAttemptNumberRef.current += 1;
     clearActiveConnection();
     autoJoinAttemptedRef.current = null;
     setIsRestoringPairing(true);
     setReconnectTick((value) => value + 1);
   }, [clearActiveConnection, rememberedPairId]);
+
+  // Every failed attempt gets a bounded retry. Without this, Firestore can
+  // report an existing Pair ID while the camera never publishes a fresh offer,
+  // and the controller will wait on a black screen forever.
+  const scheduleRememberedRetry = useCallback((message: string) => {
+    console.warn('[REMOTE] Remembered pairing retry:', message);
+    setReconnectError(message);
+    setIsRestoringPairing(true);
+
+    if (rememberedRetryTimerRef.current) {
+      clearTimeout(rememberedRetryTimerRef.current);
+    }
+    rememberedRetryTimerRef.current = setTimeout(() => {
+      rememberedRetryTimerRef.current = null;
+      restartRememberedConnection();
+    }, RECONNECT_RETRY_DELAY_MS);
+  }, [restartRememberedConnection]);
 
   const connectToSession = useCallback(async (
     scannedSessionId: string,
@@ -273,6 +323,8 @@ export default function RemoteScreen() {
       return;
     }
     connectingSessionRef.current = scannedSessionId;
+    const attemptNumber = ++connectAttemptNumberRef.current;
+    setReconnectError(null);
 
     console.log(
       isRememberedReconnect
@@ -281,22 +333,13 @@ export default function RemoteScreen() {
     );
 
     try {
-      const joined = await joinSession(scannedSessionId);
+      const joined = await withReconnectTimeout(joinSession(scannedSessionId), 'Looking up paired camera');
+      if (attemptNumber !== connectAttemptNumberRef.current) return;
       if (!joined) {
         connectingSessionRef.current = null;
 
         if (isRememberedReconnect) {
-          // The camera may simply be offline or still starting. Keep the saved
-          // Pair ID and retry; QR is only for deliberately pairing a new phone.
-          setIsRestoringPairing(true);
-          setShowScanner(false);
-          if (rememberedRetryTimerRef.current) {
-            clearTimeout(rememberedRetryTimerRef.current);
-          }
-          rememberedRetryTimerRef.current = setTimeout(() => {
-            autoJoinAttemptedRef.current = null;
-            setReconnectTick((value) => value + 1);
-          }, 5000);
+          scheduleRememberedRetry('Camera is not advertising this pairing yet.');
           return;
         }
 
@@ -319,7 +362,8 @@ export default function RemoteScreen() {
         rememberedRetryTimerRef.current = null;
       }
 
-      await createConnection();
+      await withReconnectTimeout(createConnection(), 'Creating WebRTC connection');
+      if (attemptNumber !== connectAttemptNumberRef.current) return;
 
       listenForIceCandidate(async (candidate) => {
         console.log('Received ICE candidate from camera');
@@ -332,33 +376,50 @@ export default function RemoteScreen() {
       if (isRememberedReconnect) {
         const connectionId = generateConnectionId();
         console.log(`[REMOTE] Requesting fresh controller generation ${connectionId}`);
-        await requestReconnect(connectionId);
+        await withReconnectTimeout(requestReconnect(connectionId), 'Publishing reconnect request');
+        if (attemptNumber !== connectAttemptNumberRef.current) return;
+        console.log('[REMOTE] Firestore accepted fresh controller request');
+
+        // Even an accepted Firestore write does not mean the camera is running
+        // or listening. Give it time to create an offer, answer, and open the
+        // command channel. A real STATE_UPDATE clears this watchdog.
+        connectWatchdogRef.current = setTimeout(() => {
+          if (attemptNumber !== connectAttemptNumberRef.current) return;
+          console.warn('[REMOTE] No camera state received after reconnect request');
+          restartRememberedConnection();
+        }, RECONNECT_ATTEMPT_TIMEOUT_MS);
       }
 
       onOffer(async (offer) => {
-        console.log('Received offer from camera');
-
-        await setRemoteDescription({ type: 'offer', sdp: offer.sdp });
-
-        const answer = await createAnswer();
-        await sendAnswer({ type: 'answer', sdp: answer.sdp! });
+        if (attemptNumber !== connectAttemptNumberRef.current) return;
+        console.log('[REMOTE] Received fresh offer from camera');
+        try {
+          await setRemoteDescription({ type: 'offer', sdp: offer.sdp });
+          if (attemptNumber !== connectAttemptNumberRef.current) return;
+          const answer = await createAnswer();
+          await sendAnswer({ type: 'answer', sdp: answer.sdp! });
+          console.log('[REMOTE] Published answer for camera');
+        } catch (error) {
+          console.error('[REMOTE] Could not answer camera offer:', error);
+          if (isRememberedReconnect) {
+            scheduleRememberedRetry('Camera offer could not be negotiated.');
+          }
+        }
       });
 
       setShowScanner(false);
     } catch (error) {
-      console.error('Error connecting to camera:', error);
+      if (attemptNumber !== connectAttemptNumberRef.current) return;
+      console.error('[REMOTE] Could not connect to paired camera:', error);
       connectingSessionRef.current = null;
 
       if (isRememberedReconnect) {
-        setIsRestoringPairing(true);
+        const message = error instanceof Error ? error.message : String(error);
+        const actionable = /permission-denied|insufficient permissions/i.test(message)
+          ? 'Firestore rejected reconnection. Publish updated firestore.rules.'
+          : message;
         setShowScanner(false);
-        if (rememberedRetryTimerRef.current) {
-          clearTimeout(rememberedRetryTimerRef.current);
-        }
-        rememberedRetryTimerRef.current = setTimeout(() => {
-          autoJoinAttemptedRef.current = null;
-          setReconnectTick((value) => value + 1);
-        }, 5000);
+        scheduleRememberedRetry(actionable);
         return;
       }
 
@@ -380,6 +441,8 @@ export default function RemoteScreen() {
     sendAnswer,
     requestReconnect,
     setRemoteDescription,
+    restartRememberedConnection,
+    scheduleRememberedRetry,
   ]);
 
   // Load the remembered camera once. A route/deep-link Pair ID takes priority;
@@ -419,7 +482,7 @@ export default function RemoteScreen() {
     autoJoinAttemptedRef.current = targetPairId;
     setShowScanner(false);
     setIsRestoringPairing(!initialSessionId);
-    connectToSession(targetPairId, { remembered: !initialSessionId });
+    void connectToSession(targetPairId, { remembered: !initialSessionId });
   }, [
     connectToSession,
     initialSessionId,
@@ -472,6 +535,8 @@ export default function RemoteScreen() {
   // QR is now an explicit "pair a different camera" action. Normal app
   // reopen/reconnect never clears the remembered Pair ID.
   const handleQRPress = async () => {
+    connectAttemptNumberRef.current += 1;
+    setReconnectError(null);
     if (rememberedRetryTimerRef.current) {
       clearTimeout(rememberedRetryTimerRef.current);
       rememberedRetryTimerRef.current = null;
@@ -487,6 +552,7 @@ export default function RemoteScreen() {
 
   // Handle mode toggle - navigate back to camera mode
   const handleModeToggle = async () => {
+    connectAttemptNumberRef.current += 1;
     await pairingService.setPreferredMode('camera');
     clearActiveConnection();
     router.replace('/');
@@ -591,6 +657,7 @@ export default function RemoteScreen() {
         clearTimeout(stateSyncTimeoutRef.current);
         stateSyncTimeoutRef.current = null;
       }
+      connectAttemptNumberRef.current += 1;
       clearActiveConnection();
     };
   }, [clearActiveConnection]);
@@ -650,12 +717,23 @@ export default function RemoteScreen() {
             </View>
           )}
 
-          {isRestoringPairing && !isDataChannelReady && (
-            <View style={styles.reconnectContainer} pointerEvents="none">
-              <Text style={styles.reconnectText}>Connecting to paired camera…</Text>
+          {isRestoringPairing && (
+            <View style={styles.reconnectBanner}>
+              <Text style={styles.reconnectText}>
+                {reconnectError ? 'Connection problem' : 'Connecting to paired camera…'}
+              </Text>
+              {reconnectError && (
+                <Text style={styles.reconnectErrorText}>{reconnectError}</Text>
+              )}
               {rememberedPairId && (
                 <Text style={styles.reconnectSubtext}>Pair {rememberedPairId}</Text>
               )}
+              <TouchableOpacity
+                onPress={() => restartRememberedConnection()}
+                style={styles.reconnectRetryButton}
+              >
+                <Text style={styles.reconnectRetryText}>Retry now</Text>
+              </TouchableOpacity>
             </View>
           )}
         </>
@@ -676,9 +754,39 @@ const styles = StyleSheet.create({
     backgroundColor: '#000',
     zIndex: 20,
   },
+  reconnectBanner: {
+    position: 'absolute',
+    top: 105,
+    left: 20,
+    right: 20,
+    zIndex: 20,
+    backgroundColor: 'rgba(15, 18, 24, 0.95)',
+    borderRadius: 12,
+    padding: 14,
+    alignItems: 'center',
+  },
   reconnectText: {
     color: '#fff',
     fontSize: 16,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  reconnectErrorText: {
+    color: '#ffb2a5',
+    fontSize: 12,
+    textAlign: 'center',
+    marginTop: 7,
+  },
+  reconnectRetryButton: {
+    marginTop: 10,
+    paddingHorizontal: 18,
+    paddingVertical: 9,
+    borderRadius: 8,
+    backgroundColor: '#374151',
+  },
+  reconnectRetryText: {
+    color: '#fff',
+    fontSize: 13,
     fontWeight: '600',
   },
   reconnectSubtext: {
