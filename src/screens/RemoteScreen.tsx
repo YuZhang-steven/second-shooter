@@ -99,6 +99,7 @@ export default function RemoteScreen() {
   const autoJoinAttemptedRef = useRef<string | null>(null);
   const connectingSessionRef = useRef<string | null>(null);
   const rememberedRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stateSyncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleFrameData = useCallback((frameData: FrameDataMessage) => {
     framesReceivedRef.current++;
     // Log every 30 frames (~3 seconds)
@@ -127,6 +128,11 @@ export default function RemoteScreen() {
     switch (response.type) {
       case 'STATE_UPDATE':
         console.log(`[REMOTE] STATE_UPDATE: zoom=${response.state.zoom}, facing=${response.state.facing}, streamMode=${response.streamMode}`);
+        if (stateSyncTimeoutRef.current) {
+          clearTimeout(stateSyncTimeoutRef.current);
+          stateSyncTimeoutRef.current = null;
+        }
+        setIsRestoringPairing(false);
         setRemoteState(response.state);
         if (response.lenses) {
           setRemoteLenses(response.lenses);
@@ -239,6 +245,21 @@ export default function RemoteScreen() {
     connectingSessionRef.current = null;
     setIsDataChannelReady(false);
   }, [cleanupSignaling, closeConnection]);
+
+  const restartRememberedConnection = useCallback(() => {
+    if (!rememberedPairId) return;
+
+    if (stateSyncTimeoutRef.current) {
+      clearTimeout(stateSyncTimeoutRef.current);
+      stateSyncTimeoutRef.current = null;
+    }
+
+    console.log('[REMOTE] Restarting stale remembered controller connection');
+    clearActiveConnection();
+    autoJoinAttemptedRef.current = null;
+    setIsRestoringPairing(true);
+    setReconnectTick((value) => value + 1);
+  }, [clearActiveConnection, rememberedPairId]);
 
   const connectToSession = useCallback(async (
     scannedSessionId: string,
@@ -483,7 +504,7 @@ export default function RemoteScreen() {
 
   // Volume button shutter
   const handleVolumeShutter = useCallback(() => {
-    if (connectionState !== 'connected') return;
+    if (connectionState !== 'connected' || !isDataChannelReady) return;
     if (remoteState.captureMode === 'photo') {
       handleTakePhoto();
     } else if (remoteState.isRecording) {
@@ -491,7 +512,7 @@ export default function RemoteScreen() {
     } else {
       handleStartRecording();
     }
-  }, [connectionState, remoteState.captureMode, remoteState.isRecording, handleTakePhoto, handleStartRecording, handleStopRecording]);
+  }, [connectionState, isDataChannelReady, remoteState.captureMode, remoteState.isRecording, handleTakePhoto, handleStartRecording, handleStopRecording]);
 
   useVolumeShutter({ onShutterPress: handleVolumeShutter, enabled: !showScanner });
 
@@ -509,7 +530,35 @@ export default function RemoteScreen() {
 
     console.log('Connected/foreground with data channel ready, requesting camera state');
     sendCommand({ type: 'GET_STATE' });
-  }, [isForeground, isDataChannelReady, showScanner, connectionState, sendCommand]);
+
+    // "connected" + "open" are native transport states, not proof that the
+    // returning controller can actually exchange commands with the camera.
+    // Require an application-level STATE_UPDATE acknowledgement. If it never
+    // arrives, rebuild this remembered controller as a fresh peer generation.
+    if (rememberedPairId) {
+      if (stateSyncTimeoutRef.current) {
+        clearTimeout(stateSyncTimeoutRef.current);
+      }
+      stateSyncTimeoutRef.current = setTimeout(() => {
+        stateSyncTimeoutRef.current = null;
+        console.warn('[REMOTE] GET_STATE timed out; treating connection as stale');
+        restartRememberedConnection();
+      }, 4000);
+    }
+
+    return () => {
+      // Do not cancel merely because another render changes transport state;
+      // STATE_UPDATE is the acknowledgement that owns this timer.
+    };
+  }, [
+    isForeground,
+    isDataChannelReady,
+    showScanner,
+    connectionState,
+    sendCommand,
+    rememberedPairId,
+    restartRememberedConnection,
+  ]);
 
   // The camera device normally pairs capturing:true with a later false. Clear
   // a stale busy state if the capture/recording path is interrupted.
@@ -538,6 +587,10 @@ export default function RemoteScreen() {
         clearTimeout(rememberedRetryTimerRef.current);
         rememberedRetryTimerRef.current = null;
       }
+      if (stateSyncTimeoutRef.current) {
+        clearTimeout(stateSyncTimeoutRef.current);
+        stateSyncTimeoutRef.current = null;
+      }
       clearActiveConnection();
     };
   }, [clearActiveConnection]);
@@ -550,7 +603,7 @@ export default function RemoteScreen() {
   return (
     <View style={styles.container}>
       {!pairingLoaded ? (
-        <View style={styles.reconnectContainer}>
+        <View style={styles.reconnectContainer} pointerEvents="none">
           <Text style={styles.reconnectText}>Loading paired camera…</Text>
         </View>
       ) : showScanner ? (
@@ -598,7 +651,7 @@ export default function RemoteScreen() {
           )}
 
           {isRestoringPairing && !isDataChannelReady && (
-            <View style={styles.reconnectContainer}>
+            <View style={styles.reconnectContainer} pointerEvents="none">
               <Text style={styles.reconnectText}>Connecting to paired camera…</Text>
               {rememberedPairId && (
                 <Text style={styles.reconnectSubtext}>Pair {rememberedPairId}</Text>
