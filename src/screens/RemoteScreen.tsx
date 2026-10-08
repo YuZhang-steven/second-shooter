@@ -31,7 +31,7 @@ import {
 import { parseSessionIdFromInput } from '../../shared/session-link';
 import { generateConnectionId } from '../utils/sessionId';
 
-const RECONNECT_ATTEMPT_TIMEOUT_MS = 15000;
+const RECONNECT_ATTEMPT_TIMEOUT_MS = 45000;
 const RECONNECT_RETRY_DELAY_MS = 5000;
 
 // A Firestore setDoc can wait for connectivity for a long time. A remembered
@@ -43,7 +43,7 @@ async function withReconnectTimeout<T>(task: Promise<T>, label: string): Promise
       task,
       new Promise<T>((_, reject) => {
         timer = setTimeout(
-          () => reject(new Error(`${label} timed out after 15 seconds`)),
+          () => reject(new Error(`${label} timed out after 45 seconds`)),
           RECONNECT_ATTEMPT_TIMEOUT_MS
         );
       }),
@@ -373,14 +373,9 @@ export default function RemoteScreen() {
       await withReconnectTimeout(createConnection(), 'Creating WebRTC connection');
       if (attemptNumber !== connectAttemptNumberRef.current) return;
 
-      listenForIceCandidate(async (candidate) => {
-        console.log('Received ICE candidate from camera');
-        await addPeerIceCandidate(candidate);
-      });
-
-      // A remembered controller is a new peer generation after a long
-      // suspension/relaunch. Invalidate stale SDP first, then wait only for the
-      // camera's fresh offer for this generation.
+      // A remembered controller is a NEW peer generation. Publish its
+      // generation ID before subscribing to ICE candidates; otherwise
+      // Firestore immediately replays candidates from abandoned connections.
       if (isRememberedReconnect) {
         const connectionId = generateConnectionId();
         console.log(`[REMOTE] Requesting fresh controller generation ${connectionId}`);
@@ -388,15 +383,22 @@ export default function RemoteScreen() {
         if (attemptNumber !== connectAttemptNumberRef.current) return;
         console.log('[REMOTE] Firestore accepted fresh controller request');
 
-        // Even an accepted Firestore write does not mean the camera is running
-        // or listening. Give it time to create an offer, answer, and open the
-        // command channel. A real STATE_UPDATE clears this watchdog.
+        // A native WebRTC setup plus STUN-only fallback can take longer than
+        // 15s on physical iPhones. Give the camera time to negotiate instead
+        // of repeatedly superseding its offer in a retry storm.
         connectWatchdogRef.current = setTimeout(() => {
           if (attemptNumber !== connectAttemptNumberRef.current) return;
           console.warn('[REMOTE] No camera state received after reconnect request');
+          setReconnectError('Camera did not complete control handshake. Retrying…');
           restartRememberedConnection();
         }, RECONNECT_ATTEMPT_TIMEOUT_MS);
       }
+
+      listenForIceCandidate(async (candidate) => {
+        if (attemptNumber !== connectAttemptNumberRef.current) return;
+        console.log('[REMOTE] Received ICE candidate for current generation');
+        await addPeerIceCandidate(candidate);
+      });
 
       onOffer(async (offer) => {
         if (attemptNumber !== connectAttemptNumberRef.current) return;
@@ -617,7 +619,7 @@ export default function RemoteScreen() {
         stateSyncTimeoutRef.current = null;
         console.warn('[REMOTE] GET_STATE timed out; treating connection as stale');
         restartRememberedConnection();
-      }, 4000);
+      }, 12000);
     }
 
     return () => {
@@ -736,12 +738,26 @@ export default function RemoteScreen() {
               {rememberedPairId && (
                 <Text style={styles.reconnectSubtext}>Pair {rememberedPairId}</Text>
               )}
-              <TouchableOpacity
-                onPress={() => restartRememberedConnection()}
-                style={styles.reconnectRetryButton}
-              >
-                <Text style={styles.reconnectRetryText}>Retry now</Text>
-              </TouchableOpacity>
+              <View style={styles.reconnectActions}>
+                <TouchableOpacity
+                  onPress={() => restartRememberedConnection()}
+                  style={styles.reconnectRetryButton}
+                >
+                  <Text style={styles.reconnectRetryText}>Retry now</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={handleSettingsPress}
+                  style={styles.reconnectRetryButton}
+                >
+                  <Text style={styles.reconnectRetryText}>Settings</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => void handleModeToggle()}
+                  style={styles.reconnectRetryButton}
+                >
+                  <Text style={styles.reconnectRetryText}>Camera mode</Text>
+                </TouchableOpacity>
+              </View>
             </View>
           )}
         </>
@@ -785,8 +801,15 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 7,
   },
+  reconnectActions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 6,
+    marginTop: 8,
+  },
   reconnectRetryButton: {
-    marginTop: 10,
+    marginTop: 2,
     paddingHorizontal: 18,
     paddingVertical: 9,
     borderRadius: 8,
