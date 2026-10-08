@@ -20,7 +20,7 @@ import {
   OFFER_CANDIDATES_SUBCOLLECTION,
   ANSWER_CANDIDATES_SUBCOLLECTION,
 } from '../config/firebase';
-import { generateSessionId, isValidSessionId } from '../utils/sessionId';
+import { generateSessionId, isValidSessionId, isValidConnectionId } from '../utils/sessionId';
 import { SignalingOffer, SignalingAnswer, IceCandidate } from '../types';
 
 // Signaling documents are still temporary, but an active camera can refresh
@@ -36,6 +36,7 @@ function sessionExpireAt(): Timestamp {
 type IceCandidateCallback = (candidate: IceCandidate) => void;
 type OfferCallback = (offer: SignalingOffer) => void;
 type AnswerCallback = (answer: SignalingAnswer) => void;
+type ReconnectRequestCallback = (connectionId: string) => void;
 
 class SignalingService {
   private sessionId: string | null = null;
@@ -43,6 +44,8 @@ class SignalingService {
   private unsubscribers: Unsubscribe[] = [];
   private processedOfferSdp: string | null = null;
   private processedAnswerSdp: string | null = null;
+  private processedReconnectConnectionId: string | null = null;
+  private expectedConnectionId: string | null = null;
 
   /**
    * A recording can outlive the signaling document. Firestore TTL may delete
@@ -85,6 +88,9 @@ class SignalingService {
     // Reset processed flags for new/restored session
     this.processedOfferSdp = null;
     this.processedAnswerSdp = null;
+    this.processedReconnectConnectionId = null;
+    this.expectedConnectionId = null;
+    this.expectedConnectionId = null;
 
     const normalizedPreferred = preferredSessionId?.trim().toUpperCase();
     const sessionId =
@@ -94,6 +100,12 @@ class SignalingService {
 
     const sessionRef = doc(db, SESSIONS_COLLECTION, sessionId);
     const existing = await getDoc(sessionRef);
+
+    // Treat any connection generation already stored in an old signaling
+    // document as processed. A fresh controller launch will write a new one.
+    this.processedReconnectConnectionId = existing.exists()
+      ? existing.data()?.connectionId ?? null
+      : null;
 
     if (existing.exists()) {
       // A force-quit can leave the old signaling document behind. Preserve its
@@ -107,6 +119,8 @@ class SignalingService {
           status: 'waiting',
           offer: deleteField(),
           answer: deleteField(),
+          connectionId: deleteField(),
+          reconnectRequestedAt: deleteField(),
         },
         { merge: true }
       );
@@ -130,6 +144,7 @@ class SignalingService {
     // Reset processed flags for new session
     this.processedOfferSdp = null;
     this.processedAnswerSdp = null;
+    this.expectedConnectionId = null;
 
     const sessionRef = doc(db, SESSIONS_COLLECTION, sessionId);
     const sessionDoc = await getDoc(sessionRef);
@@ -141,6 +156,34 @@ class SignalingService {
     this.sessionId = sessionId;
     this.ownsSession = false;
     return true;
+  }
+
+  // A remembered controller writes a fresh generation before waiting for an
+  // offer. Clearing old SDP prevents it from answering a stale offer left by
+  // an earlier controller process.
+  async requestReconnect(sessionId: string, connectionId: string): Promise<void> {
+    await ensureSignedIn();
+
+    if (!isValidConnectionId(connectionId)) {
+      throw new Error('Invalid connection ID');
+    }
+
+    this.expectedConnectionId = connectionId;
+    this.processedOfferSdp = null;
+
+    const sessionRef = doc(db, SESSIONS_COLLECTION, sessionId);
+    await setDoc(
+      sessionRef,
+      {
+        connectionId,
+        reconnectRequestedAt: serverTimestamp(),
+        status: 'waiting',
+        offer: deleteField(),
+        answer: deleteField(),
+        expireAt: sessionExpireAt(),
+      },
+      { merge: true }
+    );
   }
 
   // Send WebRTC offer
@@ -188,7 +231,15 @@ class SignalingService {
 
     const unsubscribe = onSnapshot(sessionRef, (snapshot) => {
       const data = snapshot.data();
-      if (data?.offer && data.offer.sdp !== this.processedOfferSdp) {
+      const connectionMatches =
+        !this.expectedConnectionId ||
+        data?.connectionId === this.expectedConnectionId;
+
+      if (
+        connectionMatches &&
+        data?.offer &&
+        data.offer.sdp !== this.processedOfferSdp
+      ) {
         // Mark this offer as processed to avoid duplicate handling
         this.processedOfferSdp = data.offer.sdp;
         callback({
@@ -246,6 +297,32 @@ class SignalingService {
       sdpMid: candidate.sdpMid,
       expireAt: sessionExpireAt(),
     });
+  }
+
+  // Camera watches for a returning remembered controller. A new connection
+  // generation means the old peer/DataChannel must not be reused.
+  onReconnectRequest(
+    sessionId: string,
+    callback: ReconnectRequestCallback
+  ): Unsubscribe {
+    const sessionRef = doc(db, SESSIONS_COLLECTION, sessionId);
+
+    const unsubscribe = onSnapshot(sessionRef, (snapshot) => {
+      const data = snapshot.data();
+      const connectionId = data?.connectionId;
+
+      if (
+        typeof connectionId === 'string' &&
+        isValidConnectionId(connectionId) &&
+        connectionId !== this.processedReconnectConnectionId
+      ) {
+        this.processedReconnectConnectionId = connectionId;
+        callback(connectionId);
+      }
+    });
+
+    this.unsubscribers.push(unsubscribe);
+    return unsubscribe;
   }
 
   // Listen for ICE candidates
